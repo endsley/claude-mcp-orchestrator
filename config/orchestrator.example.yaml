@@ -1,0 +1,178 @@
+# claude-mcp-orchestrator — example configuration
+#
+# Copy to config/orchestrator.yaml and edit. The real file is gitignored
+# because it names your machines and paths; this template is tracked.
+#
+#   cp config/orchestrator.example.yaml config/orchestrator.yaml
+#
+# Secrets NEVER belong in this file. Tokens are referenced by environment
+# VARIABLE NAME only, and Mem0 credentials come from `memory.envFile`.
+# Validate everything with:  npm run doctor
+
+server:
+  # Bind loopback and let a TLS proxy or tunnel handle public exposure.
+  # The server REFUSES to start on a non-loopback address without auth.
+  host: 127.0.0.1
+  port: 8787
+  mcpPath: /mcp
+
+  # Bound request size and duration. Enforced before authentication.
+  maxBodyBytes: 262144
+  requestTimeoutMs: 30000
+
+  # Extra hostnames accepted in the Host header (DNS-rebinding protection).
+  # Add your tunnel hostname here when proxying, e.g. mcp.example.com
+  allowedHosts: []
+  # Browser Origins allowed to call the MCP endpoint. Non-browser clients
+  # (including Claude's connector) send no Origin and are unaffected.
+  allowedOrigins: []
+
+  # Must be true to bind anything other than loopback. Deliberate friction.
+  allowNonLoopbackBind: false
+
+  auth:
+    # none   - permitted ONLY on loopback
+    # bearer - static token(s) read from the environment
+    # oauth  - NOT IMPLEMENTED; the server refuses to start with this
+    mode: bearer
+    # Only VARIABLE NAMES here. Generate a token with:
+    #   openssl rand -base64 48
+    # Tokens shorter than 24 characters are rejected.
+    tokenEnvVars: [MCP_ORCHESTRATOR_TOKEN]
+    requiredScopes: []
+
+logging:
+  level: info          # debug | info | warn | error
+  pretty: false        # true for human-readable local output
+  # Spoken instructions can contain anything; off by default.
+  logInstructionText: false
+
+database:
+  path: data/orchestrator.sqlite
+  walMode: true
+  busyTimeoutMs: 5000
+
+security:
+  filesystem:
+    # The worker may read and write inside these roots. Set them to where your
+    # code actually lives.
+    projectRoots:
+      - /home/YOUR_USER/code
+    allowOutsideProjectRead: false
+    allowOutsideProjectWrite: false
+    # Readable but never writable. Claude Code needs its own config.
+    additionalReadablePaths: [~/.claude, ~/.claude.json, ~/CLAUDE.md]
+    # Never readable or writable, whatever other rules say.
+    deniedPaths: [~/.ssh, ~/.aws, ~/.git-credentials]
+
+  # What the worker may do without asking. Classes are described in README.md.
+  approvals:
+    READ_ONLY: allow
+    LOCAL_REVERSIBLE: allow
+    EXTERNAL_SIDE_EFFECT: ask   # git push, deploy, publish, spend money
+    DESTRUCTIVE: ask            # force push, mass delete, drop database
+    PROHIBITED: deny            # sudo, SSH keys, secret exfiltration
+
+  # How long a question waits for a spoken answer before failing closed.
+  pendingRequestTimeoutMs: 1800000
+
+claude:
+  # Leave unset to use `claude` from PATH.
+  # executablePath: /home/YOUR_USER/.local/bin/claude
+  # Must include 'project' for CLAUDE.md files to load. This is how the worker
+  # inherits your existing Claude Code preferences.
+  settingSources: [user, project, local]
+  maxTurns: 300
+  sessionTimeoutMs: 7200000
+  startAckTimeoutMs: 5000
+  maxProgressEvents: 500
+  # One write-capable session per project. Read-only sessions stay concurrent.
+  enforceProjectWriteLock: true
+
+tailscale:
+  enabled: true
+  executablePath: tailscale
+  timeoutMs: 2500
+  cacheTtlMs: 10000
+
+projects:
+  roots:
+    - /home/YOUR_USER/code
+  maxDepth: 2
+  refreshIntervalMs: 300000
+  # Give projects the names you actually say out loud.
+  metadata:
+    /home/YOUR_USER/code/home-dashboard:
+      displayName: HomeDash
+      aliases: [home tab, my homepage]
+
+memory:
+  enabled: true
+  # Starts disabled so a freshly copied config validates and starts. Switch to
+  # mem0-http once envFile (or MEM0_BASE_URL) is set, then re-run `npm run doctor`.
+  provider: none             # mem0-http | mem0-cli | none
+  # Point at an existing env file holding MEM0_BASE_URL / MEM0_API_KEY /
+  # MEM0_USER_ID. Read only for MEM0_* keys and never logged. Values already
+  # exported in the environment win over this file.
+  # envFile: /path/to/mem0.env
+  apiKeyEnvVar: MEM0_API_KEY
+  userIdEnvVar: MEM0_USER_ID
+  timeoutMs: 3000
+  maxResults: 8
+  maxTokens: 1000
+  # Writes are opt-in: the orchestrator must not record everything you say.
+  allowWrites: false
+
+initialContext:
+  maxTokens: 1800
+  # Applies to every provider without its own timeoutMs below.
+  defaultTimeoutMs: 1500
+  maxConcurrency: 4
+  defaultProfile: default
+  providers:
+    computers:    { enabled: true, priority: 100, timeoutMs: 1800, cacheTtlMs: 10000 }
+    workSessions: { enabled: true, priority: 100, timeoutMs: 800 }
+    projects:     { enabled: true, priority: 90,  timeoutMs: 2500, cacheTtlMs: 60000 }
+    preferences:  { enabled: true, priority: 80,  timeoutMs: 300 }
+    memory:       { enabled: true, priority: 70,  timeoutMs: 3500 }
+    systemStatus: { enabled: true, priority: 40,  timeoutMs: 1800, cacheTtlMs: 5000 }
+
+# Named bundles of providers. `default` is what every voice turn pays for, so
+# keep it small. Add a new provider to a profile to make it reachable.
+contextProfiles:
+  default:
+    description: Compact responsive voice context.
+    providers: [computers, workSessions, projects, preferences]
+    maxTokens: 1200
+  coding:
+    description: Project and task context including focus-relevant memory.
+    providers: [computers, workSessions, projects, preferences, memory]
+    maxTokens: 2200
+  infrastructure:
+    description: Network and local resource status.
+    providers: [computers, workSessions, systemStatus]
+    maxTokens: 1400
+  minimal:
+    description: Fastest useful voice payload.
+    providers: [computers, workSessions]
+    maxTokens: 600
+
+# Tailscale knows device identity but not how YOU think about your machines.
+#
+# Keys are Tailscale MACHINE NAMES — the first label of the node's DNS name,
+# i.e. what `tailscale status` prints. A device's OS hostname (often generic on
+# Windows) is kept automatically as an alias, so either name resolves.
+#
+# Aliases are what make "the GPU machine" or "my web server" resolve. Roles are
+# read aloud. Leave anything you do not know BLANK rather than guessing.
+computers:
+  example-machine-name:
+    displayName: GPU Server
+    role: Local AI / GPU workstation
+    aliases: [gpu computer, gpu machine, ai box, the 24 gig machine]
+    notes: [Preferred for local model inference.]
+    capabilities:
+      cpu: Example CPU
+      ramGb: 64
+      gpu: NVIDIA RTX A5000
+      vramGb: 24

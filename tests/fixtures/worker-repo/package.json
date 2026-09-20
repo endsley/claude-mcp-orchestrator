@@ -1,0 +1,8 @@
+{
+  "name": "orchestrator-worker-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/message.test.js"
+  }
+}

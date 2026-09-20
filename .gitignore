@@ -1,0 +1,27 @@
+node_modules/
+dist/
+coverage/
+
+# Real environment files never get committed; .env.example is the template.
+.env
+.env.*
+!.env.example
+
+# Runtime state written by the server.
+data/
+logs/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# Operator-authored config contains machine names/aliases and may be private.
+# The *.example.yaml templates ARE tracked.
+config/*.yaml
+!config/*.example.yaml
+
+.DS_Store
+*.tsbuildinfo
+.vitest/
+tests/fixtures/tmp/

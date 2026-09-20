@@ -1,0 +1,71 @@
+# User service unit for claude-mcp-orchestrator.
+#
+# Install (as your normal user, NOT root):
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/claude-mcp-orchestrator.service ~/.config/systemd/user/
+#   # edit WorkingDirectory/ExecStart below if the checkout lives elsewhere
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now claude-mcp-orchestrator
+#   systemctl --user status claude-mcp-orchestrator
+#   journalctl --user -u claude-mcp-orchestrator -f
+#
+# To keep it running when you are not logged in:
+#   loginctl enable-linger $USER
+#
+# This unit deliberately does NOT open any firewall port and does not run as
+# root. Remote access is a separate, explicit decision (see README).
+
+[Unit]
+Description=Claude MCP Orchestrator
+Documentation=file:%h/code/claude-mcp-orchestrator/README.md
+After=network-online.target
+Wants=network-online.target
+
+# Crash-loop guard. These belong in [Unit], not [Service], on modern systemd.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/code/claude-mcp-orchestrator
+
+# Secrets live in the environment, never in this unit file or in git.
+# Create the file with mode 600 and put MCP_ORCHESTRATOR_TOKEN=... in it.
+EnvironmentFile=-%h/code/claude-mcp-orchestrator/.env
+Environment=NODE_ENV=production
+
+# A systemd --user service gets a minimal PATH. The worker spawns Claude Code,
+# which commonly lives in ~/.local/bin, so put it on PATH explicitly. (Setting
+# claude.executablePath in config also works and is more explicit.)
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+ExecStart=/usr/bin/env node dist/index.js
+
+# Restart on failure, but back off so a crash loop cannot spin the CPU.
+Restart=on-failure
+RestartSec=5
+
+# SIGTERM triggers the graceful shutdown path (drain HTTP, stop workers).
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# The worker legitimately spawns Claude Code, which reads and writes project
+# files, so the sandbox here is moderate rather than maximal. NoNewPrivileges
+# is the important one: it prevents any setuid escalation from a spawned tool.
+NoNewPrivileges=true
+PrivateTmp=true
+# Runtime state (SQLite, logs) should not be world-readable.
+UMask=0077
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=claude-mcp-orchestrator
+
+[Install]
+WantedBy=default.target
