@@ -37,7 +37,8 @@ Environment=NODE_ENV=production
 # A systemd --user service gets a minimal PATH. The worker spawns Claude Code,
 # which commonly lives in ~/.local/bin, so put it on PATH explicitly. (Setting
 # claude.executablePath in config also works and is more explicit.)
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# node22 first: better-sqlite3 >=13 needs Node 22+, and Build host system node is 20.
+Environment=PATH=%h/.local/node22/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 ExecStart=/usr/bin/env node dist/index.js
 
@@ -52,16 +53,14 @@ TimeoutStopSec=30
 # The worker legitimately spawns Claude Code, which reads and writes project
 # files, so the sandbox here is moderate rather than maximal. NoNewPrivileges
 # is the important one: it prevents any setuid escalation from a spawned tool.
+# Only directives a systemd --user unit can actually apply. The Protect*/
+# Restrict* family that manipulates the capability bounding set fails with
+# status=218/CAPABILITIES in a user manager, which stops the service from
+# starting at all - worse than the hardening is worth here.
 NoNewPrivileges=true
 PrivateTmp=true
 # Runtime state (SQLite, logs) should not be world-readable.
 UMask=0077
-ProtectControlGroups=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-RestrictSUIDSGID=true
-RestrictRealtime=true
-LockPersonality=true
 
 StandardOutput=journal
 StandardError=journal

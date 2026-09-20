@@ -40,7 +40,10 @@ async function main(): Promise<void> {
     const message = OrchestratorError.is(error) ? `[${error.code}] ${error.message}` : String(error);
     record('configuration', 'ERROR', message);
     report();
-    process.exit(2);
+    // exitCode, not exit(): exit() can terminate before a piped stdout is
+    // flushed, which made doctor silent over SSH and in CI.
+    process.exitCode = 2;
+    return;
   }
 
   const { services } = app;
@@ -158,7 +161,7 @@ async function main(): Promise<void> {
 
   await app.shutdown();
   report();
-  process.exit(checks.some((c) => c.level === 'ERROR') ? 1 : 0);
+  process.exitCode = checks.some((c) => c.level === 'ERROR') ? 1 : 0;
 }
 
 function report(): void {
@@ -173,5 +176,5 @@ function report(): void {
 
 main().catch((error: unknown) => {
   console.error('doctor failed:', error instanceof Error ? error.message : String(error));
-  process.exit(2);
+  process.exitCode = 2;
 });
