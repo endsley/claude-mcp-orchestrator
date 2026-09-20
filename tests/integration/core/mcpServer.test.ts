@@ -269,16 +269,25 @@ describe('HTTP hardening', () => {
     expect(response.status).not.toBe(200);
   });
 
-  // Configuring an unimplemented auth mode previously produced a server with no
-  // authentication at all. It must refuse to start instead.
-  it('refuses to build an app with an unimplemented auth mode', () => {
+  // An auth mode that cannot actually authenticate must refuse to start rather
+  // than fall through to serving unauthenticated traffic.
+  it('refuses oauth mode without an admin password', () => {
     const unsafe = {
       ...app.services,
       config: {
         ...app.services.config,
-        server: { ...app.services.config.server, auth: { ...app.services.config.server.auth, mode: 'oauth' as const } },
+        server: {
+          ...app.services.config.server,
+          auth: {
+            ...app.services.config.server.auth,
+            mode: 'oauth' as const,
+            resourceUrl: 'https://mcp.test.example',
+          },
+        },
       },
     };
-    expect(() => createHttpApp(unsafe, { isReady: async () => ({ ready: true }) })).toThrow(/not implemented/i);
+    expect(() =>
+      createHttpApp(unsafe, { isReady: async () => ({ ready: true }), env: {} }),
+    ).toThrow(/ADMIN_PASSWORD/);
   });
 });

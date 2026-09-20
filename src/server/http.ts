@@ -7,6 +7,9 @@ import type { AppConfig } from '../config/schema.js';
 import { isLoopbackHost } from '../config/schema.js';
 import type { Logger } from '../logging/logger.js';
 import { orchestratorError } from '../types/errors.js';
+import { createOAuthRouter } from '../security/oauth/server.js';
+import { OAuthStore } from '../security/oauth/store.js';
+import { audienceMatches, canonicalResource } from '../security/oauth/tokens.js';
 import { assertSafeDeployment, BearerAuthenticator } from './auth.js';
 import type { Services } from './container.js';
 import { createMcpServer } from './mcpServer.js';
@@ -80,26 +83,52 @@ export function createHttpApp(
     next();
   });
 
-  // Auth modes are handled exhaustively and the fallback is DENY.
-  //
-  // The previous shape built an authenticator only for 'bearer' and let every
-  // other mode fall through to next(), which meant configuring auth.mode
-  // "oauth" produced a completely unauthenticated server - the exact opposite
-  // of what the operator asked for. Fail fast instead.
-  if (config.server.auth.mode === 'oauth') {
-    throw orchestratorError(
-      'UNSAFE_DEPLOYMENT',
-      'auth.mode "oauth" is not implemented yet and must not be used: it would leave this server ' +
-        'unauthenticated. Use auth.mode "bearer" behind a TLS proxy, or bind loopback with mode "none".',
-    );
-  }
-
+  // Auth modes are handled exhaustively and the fallback is DENY. A mode with
+  // no working authenticator must refuse to start rather than fall through to
+  // serving unauthenticated traffic.
   const authenticator =
     config.server.auth.mode === 'bearer'
       ? new BearerAuthenticator(config.server.auth, env, logger)
       : undefined;
 
-  if (!authenticator && config.server.auth.mode !== 'none') {
+  let oauth: { store: OAuthStore; resource: string } | undefined;
+
+  if (config.server.auth.mode === 'oauth') {
+    const issuer = config.server.auth.resourceUrl;
+    if (!issuer) {
+      throw orchestratorError('INVALID_CONFIG', 'auth.mode "oauth" requires auth.resourceUrl');
+    }
+    const adminPassword = env[config.server.auth.adminPasswordEnvVar] ?? '';
+    if (adminPassword.length < 12) {
+      throw orchestratorError(
+        'UNSAFE_DEPLOYMENT',
+        `auth.mode "oauth" requires ${config.server.auth.adminPasswordEnvVar} to be set to at least ` +
+          '12 characters. It is the only human secret protecting the consent screen.',
+      );
+    }
+
+    const store = new OAuthStore(services.db);
+    const resource = canonicalResource(`${issuer.replace(/\/+$/, '')}${config.server.mcpPath}`);
+    oauth = { store, resource };
+
+    app.use(
+      createOAuthRouter({
+        issuer: issuer.replace(/\/+$/, ''),
+        resource,
+        scopesSupported: config.server.auth.scopesSupported,
+        adminPassword,
+        accessTokenTtlMs: config.server.auth.accessTokenTtlMs,
+        refreshTokenTtlMs: config.server.auth.refreshTokenTtlMs,
+        authorizationCodeTtlMs: config.server.auth.authorizationCodeTtlMs,
+        store,
+        logger,
+      }),
+    );
+    store.pruneExpired();
+    logger.info('oauth authorization server mounted', { issuer, resource });
+  }
+
+  if (!authenticator && !oauth && config.server.auth.mode !== 'none') {
     throw orchestratorError(
       'UNSAFE_DEPLOYMENT',
       `auth.mode "${config.server.auth.mode}" has no authenticator; refusing to serve unauthenticated.`,
@@ -128,7 +157,51 @@ export function createHttpApp(
       });
   });
 
+  /**
+   * RFC 9728 challenge. Pointing at the resource metadata is what lets an MCP
+   * client discover the authorization server and start the OAuth flow on its
+   * own, with no configuration beyond the URL the user typed.
+   */
+  const challenge = (): string => {
+    const parts = ['Bearer realm="claude-mcp-orchestrator"'];
+    if (oauth) {
+      const issuer = (config.server.auth.resourceUrl ?? '').replace(/\/+$/, '');
+      parts.push(`resource_metadata="${issuer}/.well-known/oauth-protected-resource"`);
+      parts.push(`scope="${config.server.auth.scopesSupported.join(' ')}"`);
+    }
+    return parts.join(', ');
+  };
+
+  const unauthorized = (res: Response, reason: string): void => {
+    logger.warn('rejected unauthenticated MCP request', { reason });
+    res.status(401).set('WWW-Authenticate', challenge()).json({ error: 'unauthorized' });
+  };
+
   const requireAuth = (req: Request, res: Response, next: NextFunction): void => {
+    const header = req.headers.authorization;
+
+    if (oauth) {
+      const match = /^Bearer\s+(.+)$/i.exec((header ?? '').trim());
+      if (!match?.[1]) {
+        unauthorized(res, 'missing bearer token');
+        return;
+      }
+      const record = oauth.store.lookupToken(match[1], 'access');
+      if (!record) {
+        unauthorized(res, 'access token unknown, expired or revoked');
+        return;
+      }
+      // RFC 8707 / MCP: the token MUST have been issued for THIS resource.
+      // Skipping this is how a token minted for another service gets accepted.
+      if (!audienceMatches(record.audience, oauth.resource)) {
+        logger.warn('rejected token issued for a different audience', { audience: record.audience });
+        unauthorized(res, 'token audience does not match this resource');
+        return;
+      }
+      next();
+      return;
+    }
+
     if (!authenticator) {
       // Reachable ONLY for mode 'none', which assertSafeDeployment has already
       // proven implies a loopback bind. Re-assert it here rather than trusting
@@ -141,16 +214,13 @@ export function createHttpApp(
       res.status(500).json({ error: 'server misconfigured' });
       return;
     }
-    const result = authenticator.verify(req.headers.authorization);
+
+    const result = authenticator.verify(header);
     if (result.ok) {
       next();
       return;
     }
-    logger.warn('rejected unauthenticated MCP request', { reason: result.reason });
-    res
-      .status(401)
-      .set('WWW-Authenticate', 'Bearer realm="claude-mcp-orchestrator"')
-      .json({ error: 'unauthorized' });
+    unauthorized(res, result.reason ?? 'invalid token');
   };
 
   app.all(config.server.mcpPath, requireAuth, (req: Request, res: Response) => {

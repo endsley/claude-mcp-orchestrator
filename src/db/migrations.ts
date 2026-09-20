@@ -141,6 +141,60 @@ export const MIGRATIONS: Migration[] = [
       `CREATE UNIQUE INDEX idx_project_write_locks_session ON project_write_locks(work_session_id)`,
     ],
   },
+  {
+    version: 3,
+    name: 'oauth',
+    statements: [
+      // Dynamically-registered OAuth clients (RFC 7591). Public clients only:
+      // an MCP client running on a phone cannot keep a secret, so PKCE is the
+      // protection rather than client authentication.
+      `CREATE TABLE oauth_clients (
+        client_id TEXT PRIMARY KEY,
+        client_name TEXT,
+        redirect_uris_json TEXT NOT NULL,
+        grant_types_json TEXT NOT NULL,
+        response_types_json TEXT NOT NULL,
+        token_endpoint_auth_method TEXT NOT NULL DEFAULT 'none',
+        scope TEXT,
+        client_uri TEXT,
+        created_at TEXT NOT NULL
+      )`,
+
+      // Authorization codes are single-use and short-lived. Everything the
+      // token request must be checked against is bound here at issue time:
+      // client, redirect_uri, PKCE challenge and the RFC 8707 resource.
+      `CREATE TABLE oauth_authorization_codes (
+        code_hash TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        redirect_uri TEXT NOT NULL,
+        code_challenge TEXT NOT NULL,
+        code_challenge_method TEXT NOT NULL,
+        resource TEXT,
+        scope TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX idx_oauth_codes_expiry ON oauth_authorization_codes(expires_at)`,
+
+      // Tokens are stored HASHED. A database read must not yield a usable
+      // credential. `audience` is what makes RFC 8707 validation possible.
+      `CREATE TABLE oauth_tokens (
+        token_hash TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN ('access','refresh')),
+        client_id TEXT NOT NULL,
+        audience TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT,
+        /* refresh tokens are rotated: this links a token to its replacement */
+        rotated_to TEXT,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX idx_oauth_tokens_client ON oauth_tokens(client_id)`,
+      `CREATE INDEX idx_oauth_tokens_expiry ON oauth_tokens(expires_at)`,
+    ],
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;

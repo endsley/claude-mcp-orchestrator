@@ -39,11 +39,27 @@ export const authConfigSchema = z.object({
    * themselves are NEVER written to config — only the variable names are.
    */
   tokenEnvVars: z.array(z.string().min(1)).default(['MCP_ORCHESTRATOR_TOKEN']),
-  /** Public URL this server is reached at; required for OAuth metadata. */
+  /**
+   * Public URL this server is reached at, e.g. https://mcp.example.com.
+   * Required for `oauth`: it is the issuer, and the canonical resource
+   * identifier that access tokens are bound to (RFC 8707 audience).
+   */
   resourceUrl: z.string().url().optional(),
-  /** Authorization server issuer URLs, for `oauth` mode. */
+  /** External authorization server issuers, when not using the built-in one. */
   authorizationServers: z.array(z.string().url()).default([]),
   requiredScopes: z.array(z.string()).default([]),
+  /** Scopes advertised in discovery metadata. */
+  scopesSupported: z.array(z.string()).default(['mcp']),
+  /**
+   * Env var holding the password that gates the OAuth consent screen. This is
+   * the single human secret in the flow: it is what proves the browser session
+   * approving a client is really the operator.
+   */
+  adminPasswordEnvVar: z.string().default('MCP_ORCHESTRATOR_ADMIN_PASSWORD'),
+  /** Short-lived by design; the refresh token carries longevity. */
+  accessTokenTtlMs: z.number().int().min(60_000).default(3_600_000),
+  refreshTokenTtlMs: z.number().int().min(300_000).default(2_592_000_000),
+  authorizationCodeTtlMs: z.number().int().min(10_000).default(120_000),
 });
 
 export const serverConfigSchema = z.object({
@@ -281,12 +297,28 @@ export const appConfigSchema = z
       });
     }
 
-    if (config.server.auth.mode === 'oauth' && !config.server.auth.resourceUrl) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['server', 'auth', 'resourceUrl'],
-        message: 'auth.mode "oauth" requires auth.resourceUrl (the public URL of this server)',
-      });
+    if (config.server.auth.mode === 'oauth') {
+      if (!config.server.auth.resourceUrl) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['server', 'auth', 'resourceUrl'],
+          message: 'auth.mode "oauth" requires auth.resourceUrl (the public https URL of this server)',
+        });
+      } else if (!config.server.auth.resourceUrl.startsWith('https://')) {
+        // OAuth 2.1 requires the authorization server be served over HTTPS.
+        ctx.addIssue({
+          code: 'custom',
+          path: ['server', 'auth', 'resourceUrl'],
+          message: 'auth.resourceUrl must be https (OAuth 2.1 requires TLS); terminate TLS at your proxy',
+        });
+      }
+      if (config.server.auth.refreshTokenTtlMs <= config.server.auth.accessTokenTtlMs) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['server', 'auth', 'refreshTokenTtlMs'],
+          message: 'refreshTokenTtlMs must be longer than accessTokenTtlMs',
+        });
+      }
     }
 
     // A profile naming a provider that does not exist is a silent no-op at
