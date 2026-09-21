@@ -53,7 +53,7 @@ export function normalizeTailscaleStatus(status: TailscaleStatusRaw, metadata: R
     // The Tailscale MACHINE NAME is the first label of DNSName - it is what
     // `tailscale status` prints and what the user says out loud. HostName is
     // the device's OS hostname, which on Windows is often something generic
-    // like "Guest"; using it made the machine the user calls "laptop"
+    // like "DESKTOP-4F21"; using it made the machine the user calls "laptop"
     // unresolvable and displayed it to them under a name they never chose.
     const osHostName = nonBlank(raw.HostName);
     const dnsLabel = nonBlank(raw.DNSName)?.split('.')[0];
@@ -89,7 +89,7 @@ export function normalizeTailscaleStatus(status: TailscaleStatusRaw, metadata: R
       machineName,
       displayName: extra.displayName?.trim() || machineName,
       // Keep the OS hostname as an alias so BOTH names resolve: the user may
-      // say "laptop" (Tailscale) or "Guest" (what Windows calls itself).
+      // say "laptop" (Tailscale) or "DESKTOP-4F21" (what Windows calls itself).
       aliases: [
         ...new Set(
           [...(extra.aliases ?? []), osHostName ?? '']

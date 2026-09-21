@@ -37,7 +37,7 @@ Environment=NODE_ENV=production
 # A systemd --user service gets a minimal PATH. The worker spawns Claude Code,
 # which commonly lives in ~/.local/bin, so put it on PATH explicitly. (Setting
 # claude.executablePath in config also works and is more explicit.)
-# node22 first: better-sqlite3 >=13 needs Node 22+, and Build host system node is 20.
+# node22 first: better-sqlite3 >=13 needs Node 22+, and the host system node may be older.
 Environment=PATH=%h/.local/node22/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 ExecStart=/usr/bin/env node dist/index.js

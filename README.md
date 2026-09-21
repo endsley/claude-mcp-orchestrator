@@ -85,7 +85,7 @@ Initial providers are:
 
 Profiles in `config/orchestrator.yaml` are `default`, `coding`,
 `infrastructure`, and `minimal`. `get_environment_context(profile="coding",
-focus="HomeDash mobile navigation")` can add task-relevant Mem0 without dumping
+focus="home dashboard mobile navigation")` can add task-relevant Mem0 without dumping
 the memory database.
 
 ### Add a provider
@@ -100,16 +100,17 @@ No assembler rewrite or public MCP protocol change is required. The shipped
 
 ## Tailscale computers
 
-The initial inventory is generated from real local `tailscale status --json`:
+The initial inventory is generated from your local `tailscale status --json`,
+so it reflects your own machines. For example:
 
 | Machine | Status observed during setup |
 | --- | --- |
 | `workstation` | local primary Linux workstation |
-| `media-host` | online |
 | `build-host` | online; direct route observed |
-| `lotus-clinic` | online |
-| `Guest` | offline |
-| `Backup host` | offline |
+| `media-host` | online |
+| `app-host` | online |
+| `laptop` | offline |
+| `backup-host` | offline |
 
 Edit the `computers` block in `config/orchestrator.yaml`
 to set display names, roles, aliases, and capability notes. The resolver checks
@@ -123,15 +124,14 @@ machine.
 
 ## Project discovery
 
-Only configured roots are scanned—currently `/home/user/code` and
-`/home/user/ambient`—and discovery is bounded/cached. A candidate needs a
+Only configured roots are scanned—for example `~/code` and
+`~/ambient`—and discovery is bounded/cached. A candidate needs a
 marker such as `.git`, `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`,
 `CLAUDE.md`, or `README.md`. Metadata aliases are declarative; they never
 invent a missing path.
 
-Initial aliases include HomeDash, Transit, `courses.example.edu`, Lotus Clinic
-Wellness, TV, Assistant, and this orchestrator. Edit them in
-`config/orchestrator.yaml`.
+Aliases are yours to declare—`home dashboard`, `the transit app`, `the clinic
+site`, and so on. Edit them in `config/orchestrator.yaml`.
 
 ## Mem0
 

@@ -103,7 +103,7 @@ projects:
   # Give projects the names you actually say out loud.
   metadata:
     /home/YOUR_USER/code/home-dashboard:
-      displayName: HomeDash
+      displayName: Home Dashboard
       aliases: [home tab, my homepage]
 
 memory:

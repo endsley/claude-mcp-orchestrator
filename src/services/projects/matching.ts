@@ -30,7 +30,7 @@ const STOP_WORDS = new Set([
  * evidence about it. For equal coverage an identity match therefore outranks
  * a description match. This is a ranking preference, not a guarantee: strong
  * coverage of a description can still beat weak, partial coverage of a name,
- * which is intended - "the acupuncture booking site" should find LotusClinic.
+ * which is intended - "the acupuncture booking site" should find a clinic app.
  */
 const IDENTITY_WEIGHT = 1;
 const REMOTE_WEIGHT = 0.95;
@@ -94,7 +94,7 @@ export function projectLabels(project: Project): WeightedLabel[] {
 
 /**
  * Tolerant single-token comparison: plurals and clipped forms ("class" for
- * "classes", "water" for "lotus-clinic") should match, and so should a small
+ * "classes", "lotus" for "lotusclinic") should match, and so should a small
  * transcription slip from voice input.
  */
 function tokenMatches(token: string, labelTokens: Set<string>): boolean {

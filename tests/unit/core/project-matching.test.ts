@@ -21,7 +21,7 @@ const corpus: Project[] = [
     description: 'MCP orchestration server that lets Claude on Android drive Claude Code on a Linux workstation.',
   }),
   project({
-    name: 'UserClass_V2',
+    name: 'course-portal',
     displayName: 'courses.example.edu',
     aliases: ['teaching app', 'class app', 'classes'],
     description: 'FastAPI teaching application serving course materials and homework.',
@@ -29,13 +29,13 @@ const corpus: Project[] = [
   project({
     name: 'lotus-clinic',
     displayName: 'LotusClinic',
-    aliases: ['lotus clinic', 'clinic site'],
+    aliases: ['lotus', 'clinic site'],
     description: 'Booking and billing site for an acupuncture clinic.',
-    git: { isRepo: true, remote: 'workstation/lotus-clinic' },
+    git: { isRepo: true, remote: 'example-org/lotus-clinic' },
   }),
-  project({ name: 'homeDash', displayName: 'HomeDash', aliases: ['home dash', 'my homepage'] }),
+  project({ name: 'home-dash', displayName: 'HomeDash', aliases: ['home dash', 'my homepage'] }),
   project({ name: 'tv', description: 'Media streaming server with a phone browser UI.' }),
-  project({ name: 'assistant', displayName: 'Assistant', aliases: ['jane', 'jane runtime'] }),
+  project({ name: 'assistant', displayName: 'Assistant', aliases: ['helper', 'helper runtime'] }),
 ];
 
 const matcher = new ProjectMatcher(corpus);
@@ -66,15 +66,15 @@ describe('contentTokens', () => {
 
 describe('projectLabels', () => {
   it('includes description and git remote, which resolution used to ignore', () => {
-    const lotus-clinic = corpus.find((candidate) => candidate.name === 'lotus-clinic')!;
-    const texts = projectLabels(lotus-clinic).map((label) => label.text);
+    const clinic = corpus.find((candidate) => candidate.name === 'lotus-clinic')!;
+    const texts = projectLabels(clinic).map((label) => label.text);
     expect(texts).toContain('Booking and billing site for an acupuncture clinic.');
-    expect(texts).toContain('workstation/lotus-clinic');
+    expect(texts).toContain('example-org/lotus-clinic');
   });
 
   it('scores an identity label above a description label', () => {
-    const lotus-clinic = corpus.find((candidate) => candidate.name === 'lotus-clinic')!;
-    const labels = projectLabels(lotus-clinic);
+    const clinic = corpus.find((candidate) => candidate.name === 'lotus-clinic')!;
+    const labels = projectLabels(clinic);
     const alias = labels.find((label) => label.text === 'clinic site')!;
     const description = labels.find((label) => label.text.startsWith('Booking'))!;
     expect(alias.weight).toBeGreaterThan(description.weight);
@@ -91,7 +91,8 @@ describe('ProjectMatcher', () => {
    * word dropped an exact alias from 1.0 to 0.733, under the 0.78 threshold.
    */
   it('is not defeated by a leading article', () => {
-    expect(matcher.score('the clinic site', corpus[2]!)).toBeCloseTo(1, 5);
+    const clinic = corpus.find((candidate) => candidate.name === 'lotus-clinic')!;
+    expect(matcher.score('the clinic site', clinic)).toBeCloseTo(1, 5);
     expect(resolves('the clinic site')).toBe('lotus-clinic');
   });
 
@@ -106,11 +107,11 @@ describe('ProjectMatcher', () => {
   });
 
   it('matches on the github remote', () => {
-    expect(resolves('workstation/lotus-clinic')).toBe('lotus-clinic');
+    expect(resolves('example-org/lotus-clinic')).toBe('lotus-clinic');
   });
 
   it('tolerates clipped and plural forms', () => {
-    expect(resolves('the app for my classes')).toBe('UserClass_V2');
+    expect(resolves('the app for my classes')).toBe('course-portal');
   });
 
   it('still finds nothing for a project that does not exist', () => {
@@ -118,21 +119,22 @@ describe('ProjectMatcher', () => {
   });
 
   /**
-   * Regression: "not" reached the corpus through a project description and
-   * became the only scoreable word in this phrase, scoring 0.85 against three
-   * unrelated projects. Vague words are dropped, and full coverage of a
-   * single common word is discounted rather than trusted.
+   * Review findings from the panel, each an actual defect in the first cut.
+   *
+   * "not" reached the corpus through a project description and became the only
+   * scoreable word in this phrase, scoring 0.85 against three unrelated
+   * projects. Vague words are dropped, and full coverage of a single common
+   * word is discounted rather than trusted.
    */
   it('does not manufacture candidates from vague words', () => {
     expect(matcher.queryTokens('some project that does not exist')).not.toContain('not');
     expect(rank('some project that does not exist')[0]!.score).toBeLessThan(0.55);
   });
 
-  /** Review findings from the panel, each an actual defect in the first cut. */
   it('pools evidence split across two labels', () => {
-    // "lotus-clinic" is the name, "acupuncture" only the description; neither
-    // label covers the phrase alone.
-    expect(resolves('lotus-clinic acupuncture')).toBe('lotus-clinic');
+    // "lotus" is the name, "acupuncture" only the description; neither label
+    // covers the phrase alone.
+    expect(resolves('lotus acupuncture')).toBe('lotus-clinic');
   });
 
   it('does not route a mostly-unknown request to an existing project', () => {
@@ -147,8 +149,8 @@ describe('ProjectMatcher', () => {
   });
 
   it('keeps the project id matchable', () => {
-    const lotus-clinic = corpus.find((candidate) => candidate.name === 'lotus-clinic')!;
-    expect(projectLabels(lotus-clinic).map((label) => label.text)).toContain(lotus-clinic.id);
+    const clinic = corpus.find((candidate) => candidate.name === 'lotus-clinic')!;
+    expect(projectLabels(clinic).map((label) => label.text)).toContain(clinic.id);
   });
 
   it('bounds the work an oversized query can force', () => {

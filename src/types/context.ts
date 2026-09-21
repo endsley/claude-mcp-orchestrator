@@ -20,7 +20,7 @@ export interface ActiveContextSnapshot {
 export interface InitialContextRequest {
   /** Resolved profile name, e.g. "default", "coding". */
   profile: string;
-  /** Free-text hint from the caller, e.g. "HomeDash mobile nav". */
+  /** Free-text hint from the caller, e.g. "home dashboard mobile nav". */
   focus?: string;
   /**
    * Soft token budget for THIS provider's section. The assembler still trims
