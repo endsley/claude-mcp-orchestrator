@@ -4,7 +4,8 @@ import { existsSync } from 'node:fs';
 import { access, realpath, readdir, readFile } from 'node:fs/promises';
 import { basename, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { normalizeLookup, similarity } from '../../context/text.js';
+import { normalizeLookup } from '../../context/text.js';
+import { ProjectMatcher } from './matching.js';
 import { orchestratorError } from '../../types/errors.js';
 import type { Project, ProjectMetadata, ProjectResolution } from './types.js';
 import type { ProjectGitState } from '../../types/projects.js';
@@ -265,12 +266,19 @@ export class ProjectRegistry {
     const normalizedQuery = normalizeLookup(query);
     if (!normalizedQuery) return { kind: 'not_found', candidates: [] };
     const projects = (await this.list()).filter((project) => computerId === undefined || project.computerId === computerId);
+    // Scoring is token-based (see ./matching.ts). Whole-string edit distance
+    // charged for every filler word a person says, so "the clinic site" scored
+    // 0.733 against the literal alias "clinic site" and fell under the
+    // threshold, and description and remote were never consulted at all.
+    const matcher = new ProjectMatcher(projects);
+    // Tokenised once: the fuzzy vocabulary scan does not vary by project.
+    const prepared = matcher.prepare(query);
     const scored = projects.map((project) => {
       const labels = [project.id, project.name, project.displayName, project.path, ...project.aliases];
       return {
         project,
         exact: labels.some((label) => normalizeLookup(label) === normalizedQuery),
-        score: Math.max(...labels.map((label) => similarity(normalizedQuery, label))),
+        score: matcher.scorePrepared(prepared, project),
       };
     }).sort((left, right) => right.score - left.score);
     const exact = scored.filter((entry) => entry.exact);

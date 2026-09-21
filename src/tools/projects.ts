@@ -59,6 +59,10 @@ export function registerProjectTools(server: McpServer, services: Services): voi
         });
       }
       if (resolution.kind === 'not_found' || !resolution.project) {
+        // The shared error log records only the code, which makes a failed
+        // lookup undiagnosable after the fact: the phrase that missed is the
+        // one piece of information needed to fix the matching.
+        logger.warn('project lookup found nothing', { tool: 'find_project', query: args.query });
         throw orchestratorError('PROJECT_NOT_FOUND', `No project matches "${args.query}".`, {
           details: { query: args.query },
           hint: 'Call list_projects to see what exists.',
@@ -88,6 +92,7 @@ export function registerProjectTools(server: McpServer, services: Services): voi
       } catch {
         const resolution = await projects.resolve(args.project);
         if (resolution.kind !== 'match' || !resolution.project) {
+          logger.warn('project lookup found nothing', { tool: 'get_project_context', query: args.project });
           throw orchestratorError('PROJECT_NOT_FOUND', `No project matches "${args.project}".`, {
             details: { query: args.project },
           });
