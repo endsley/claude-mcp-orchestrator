@@ -91,23 +91,79 @@ async function detectLanguage(path: string): Promise<{ language?: string; framew
   return {};
 }
 
+/**
+ * Normalise a git remote URL to `owner/repo`.
+ *
+ * Both SSH (`git@github.com:owner/repo.git`) and HTTPS forms reduce to the
+ * same short identity, which is what a person actually says out loud.
+ */
+export function shortRemote(url: string): string | undefined {
+  const cleaned = url.trim().replace(/\.git$/, '');
+  if (cleaned === '') return undefined;
+  const ssh = /^[^@]+@[^:]+:(.+)$/.exec(cleaned);
+  if (ssh?.[1]) return ssh[1];
+  try {
+    return new URL(cleaned).pathname.replace(/^\/+/, '') || undefined;
+  } catch {
+    return cleaned;
+  }
+}
+
 async function inspectGit(path: string): Promise<ProjectGitState> {
   try {
-    const [{ stdout: statusOut }, { stdout: activityOut }] = await Promise.all([
+    const [status, activity, remote, subject] = await Promise.all([
       execFile('git', ['-C', path, 'status', '--porcelain=v1', '--branch'], { timeout: 2_000, maxBuffer: 128_000, encoding: 'utf8' }),
       execFile('git', ['-C', path, 'log', '-1', '--format=%cI'], { timeout: 2_000, maxBuffer: 8_000, encoding: 'utf8' }),
+      // A missing remote is normal, not an error; fall back to empty output.
+      execFile('git', ['-C', path, 'remote', 'get-url', 'origin'], { timeout: 2_000, maxBuffer: 8_000, encoding: 'utf8' }).catch(() => ({ stdout: '' })),
+      execFile('git', ['-C', path, 'log', '-1', '--format=%s'], { timeout: 2_000, maxBuffer: 8_000, encoding: 'utf8' }).catch(() => ({ stdout: '' })),
     ]);
-    const lines = statusOut.split('\n').filter(Boolean);
+    const lines = status.stdout.split('\n').filter(Boolean);
     const header = lines[0] ?? '';
     const branch = /^## ([^ .]+)(?:\.\.\.)?/.exec(header)?.[1];
     const result: ProjectGitState = { isRepo: true, dirty: lines.length > 1 };
     if (branch !== undefined && branch !== 'HEAD') result.branch = branch;
-    const lastActivity = activityOut.trim();
+    const lastActivity = activity.stdout.trim();
     if (lastActivity) result.lastCommitAt = lastActivity;
+    const short = shortRemote(remote.stdout);
+    if (short) result.remote = short;
+    const lastSubject = subject.stdout.trim();
+    if (lastSubject) result.lastCommitSubject = lastSubject;
     return result;
   } catch {
     return { isRepo: false };
   }
+}
+
+/**
+ * One-line description of what a project IS.
+ *
+ * Without this the context is a bare list of directory names, which is almost
+ * useless in conversation - the user says "the transit app" and the model has
+ * no idea which of 28 names that is. package.json description is preferred
+ * because it is curated; the README heading is the common fallback.
+ */
+async function detectDescription(path: string): Promise<string | undefined> {
+  try {
+    const pkg = JSON.parse(await readFile(join(path, 'package.json'), 'utf8')) as { description?: unknown };
+    if (typeof pkg.description === 'string' && pkg.description.trim()) return pkg.description.trim().slice(0, 160);
+  } catch {
+    // no package.json, or unparseable - fall through to the README
+  }
+  for (const name of ['README.md', 'CLAUDE.md']) {
+    try {
+      const text = await readFile(join(path, name), 'utf8');
+      for (const raw of text.split('\n').slice(0, 25)) {
+        const line = raw.trim();
+        // Skip headings, badges, blank lines and HTML; take the first prose.
+        if (line === '' || line.startsWith('#') || line.startsWith('<') || line.startsWith('[!') || line.startsWith('---')) continue;
+        return line.replace(/[*_`]/g, '').slice(0, 160);
+      }
+    } catch {
+      // try the next candidate
+    }
+  }
+  return undefined;
 }
 
 async function isProjectCandidate(path: string): Promise<boolean> {
@@ -250,6 +306,9 @@ export class ProjectRegistry {
     };
     if (detected.language !== undefined) project.language = detected.language;
     if (detected.framework !== undefined) project.framework = detected.framework;
+    const description = metadata.description?.trim() || (await detectDescription(path));
+    if (description) project.description = description;
+    if (project.git?.lastCommitAt) project.lastActivityAt = project.git.lastCommitAt;
     return project;
   }
 }

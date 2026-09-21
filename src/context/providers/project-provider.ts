@@ -4,16 +4,19 @@ import type { ProjectRegistry } from '../../services/projects/project-registry.j
 
 function compactProject(project: Project): string {
   const tech = [project.language, project.framework].filter(Boolean).join(' / ');
-  // Build the parenthetical from parts and join once. The previous version
-  // prefixed the branch with ", " and then wrapped it in parens, so every line
-  // rendered as "(, main)" - a stray comma the voice model reads aloud.
   const details = [project.git?.branch, project.git?.dirty ? 'uncommitted changes' : undefined].filter(
     (part): part is string => Boolean(part),
   );
+  // The GitHub repo and a one-line purpose are what make a bare directory name
+  // usable in conversation: without them the model cannot tell which of nearly
+  // thirty similarly-named directories the user means by "the transit app".
+  const repo = project.git?.remote;
   return (
     `${project.displayName}` +
     `${tech ? ` — ${tech}` : ''}` +
-    `${details.length > 0 ? ` (${details.join(', ')})` : ''}`
+    `${details.length > 0 ? ` (${details.join(', ')})` : ''}` +
+    `${repo ? ` [${repo}]` : ''}` +
+    `${project.description ? `\n    ${project.description}` : ''}`
   );
 }
 
