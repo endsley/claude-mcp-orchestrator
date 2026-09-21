@@ -474,3 +474,83 @@ describe('audience binding', () => {
     expect((await mcpCall(equivalent.token, 51)).status).toBe(200);
   });
 });
+
+/**
+ * The consent page is served by this server and posts back to it, so the
+ * browser sends Origin: <public-url>. The SDK defaults Origin validation to
+ * localhost-only on a loopback bind, which 403'd that same-origin form post and
+ * made the OAuth flow impossible to complete from a real browser. The server's
+ * own origin must therefore be allowed automatically.
+ */
+describe('same-origin consent posts', () => {
+  it('accepts the consent page GET carrying its own Origin', async () => {
+    const res = await fetch(`${base}/oauth/authorize?client_id=nope`, {
+      headers: { origin: issuer },
+    });
+    // 400 (unknown client) is fine; 403 would mean the origin guard blocked it.
+    expect(res.status).not.toBe(403);
+  });
+
+  it('accepts the consent POST carrying its own Origin', async () => {
+    const res = await fetch(`${base}/oauth/authorize`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { origin: issuer, 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ request_id: 'bogus', password: 'x', approve: 'yes' }).toString(),
+    });
+    expect(res.status).not.toBe(403);
+  });
+
+  it('completes an entire flow with a browser Origin header on every step', async () => {
+    const reg = await fetch(`${base}/oauth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: issuer },
+      body: JSON.stringify({ client_name: 'Origin Test', redirect_uris: [REDIRECT_URI] }),
+    });
+    const clientId = ((await reg.json()) as any).client_id;
+    const { verifier, challenge } = pkce();
+
+    const page = await fetch(
+      `${base}/oauth/authorize?${new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: REDIRECT_URI,
+        response_type: 'code',
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+      })}`,
+      { headers: { origin: issuer } },
+    );
+    expect(page.status).toBe(200);
+    const requestId = /name="request_id" value="([^"]+)"/.exec(await page.text())![1]!;
+
+    const consent = await fetch(`${base}/oauth/authorize`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { origin: issuer, 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ request_id: requestId, password: ADMIN_PASSWORD, approve: 'yes' }).toString(),
+    });
+    expect(consent.status).toBe(302);
+    const code = new URL(consent.headers.get('location')!).searchParams.get('code')!;
+
+    const tok = await fetch(`${base}/oauth/token`, {
+      method: 'POST',
+      headers: { origin: issuer, 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: REDIRECT_URI,
+        client_id: clientId,
+        code_verifier: verifier,
+      }).toString(),
+    });
+    expect(tok.status).toBe(200);
+    expect((await mcpCall(((await tok.json()) as any).access_token, 60)).status).toBe(200);
+  });
+
+  it('still rejects a genuinely foreign origin', async () => {
+    const res = await fetch(`${base}/oauth/authorize?client_id=nope`, {
+      headers: { origin: 'https://evil.example.com' },
+    });
+    expect(res.status).toBe(403);
+  });
+});
