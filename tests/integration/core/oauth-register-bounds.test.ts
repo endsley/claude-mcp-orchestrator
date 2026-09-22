@@ -78,6 +78,46 @@ describe('dynamic client registration bounds', () => {
     expect(((await res.json()) as { error: string }).error).toBe('invalid_redirect_uri');
   });
 
+  /**
+   * The scheme check used to short-circuit: `protocol !== 'https:' &&
+   * !isLoopback && protocol !== 'http:'` is false as soon as the host is
+   * loopback, so no scheme validation ran for loopback hosts at all.
+   */
+  it.each(['gopher://localhost/x', 'ftp://127.0.0.1/y', 'file://localhost/z'])(
+    'rejects %s even though the host is loopback',
+    async (uri) => {
+      const res = await register({ client_name: 'scheme', redirect_uris: [uri] });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('invalid_redirect_uri');
+    },
+  );
+
+  it('still accepts the two schemes that are supposed to work', async () => {
+    const https = await register({ client_name: 'ok-https', redirect_uris: ['https://claude.ai/cb'] });
+    expect(https.status).toBe(201);
+    await https.json();
+    const loopback = await register({ client_name: 'ok-loopback', redirect_uris: ['http://127.0.0.1:9999/cb'] });
+    expect(loopback.status).toBe(201);
+    await loopback.json();
+  });
+
+  /**
+   * A rejected registration creates no row, so it must not spend the owner's
+   * allowance - especially since that allowance is one globally shared bucket
+   * behind the tunnel.
+   */
+  it('does not spend throttle budget on requests it rejects', async () => {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const res = await register({ client_name: 'bad', redirect_uris: ['gopher://localhost/x'] });
+      expect(res.status).toBe(400);
+      await res.json();
+    }
+    // Well past the limit in rejected attempts; a valid one must still work.
+    const good = await register({ client_name: 'after-rejections', redirect_uris: [REDIRECT_URI] });
+    expect(good.status).toBe(201);
+    await good.json();
+  }, 30_000);
+
   it('serves normal registrations, then throttles a flood', async () => {
     // The first one must work: throttling legitimate single-user setup would
     // be a worse bug than the one being fixed.

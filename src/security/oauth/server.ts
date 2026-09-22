@@ -167,7 +167,10 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
       oauthError(res, 429, 'too_many_requests', 'Too many client registrations. Try again later.');
       return;
     }
-    registrationThrottle.record(throttleKey);
+    // Budget is spent below, only once the request has passed validation.
+    // Recording first let a malformed request consume the allowance without
+    // ever creating a row, which spends the owner's shared bucket on traffic
+    // that was never going to cost anything.
 
     const body = (req.body ?? {}) as Record<string, unknown>;
     const redirectUris = Array.isArray(body['redirect_uris']) ? (body['redirect_uris'] as unknown[]) : [];
@@ -186,14 +189,17 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
         oauthError(res, 400, 'invalid_redirect_uri', `not a valid URL: ${candidate}`);
         return;
       }
-      // OAuth 2.1: redirect URIs must be HTTPS or loopback.
+      // OAuth 2.1: https everywhere, with plain http allowed only on loopback.
+      //
+      // Stated as an allowlist on purpose. The previous form tested
+      // `protocol !== 'https:' && !isLoopback && protocol !== 'http:'`, which
+      // short-circuits on `!isLoopback`, so for a loopback host NO scheme
+      // check ran and gopher://localhost/x or ftp://127.0.0.1/y registered
+      // happily. Enumerate what is allowed rather than what is forbidden.
       const isLoopback = parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost' || parsed.hostname === '[::1]';
-      if (parsed.protocol !== 'https:' && !isLoopback && parsed.protocol !== 'http:') {
-        oauthError(res, 400, 'invalid_redirect_uri', 'redirect_uri must use https or loopback');
-        return;
-      }
-      if (parsed.protocol === 'http:' && !isLoopback) {
-        oauthError(res, 400, 'invalid_redirect_uri', 'plain http is only allowed for loopback');
+      const allowed = parsed.protocol === 'https:' || (parsed.protocol === 'http:' && isLoopback);
+      if (!allowed) {
+        oauthError(res, 400, 'invalid_redirect_uri', 'redirect_uri must use https, or http on loopback');
         return;
       }
       uris.push(candidate);
@@ -203,6 +209,9 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
       oauthError(res, 400, 'invalid_redirect_uri', 'at least one redirect_uri is required');
       return;
     }
+
+    // Validation passed and a row is about to exist: charge it now.
+    registrationThrottle.record(throttleKey);
 
     const client = store.registerClient({
       ...(typeof body['client_name'] === 'string' ? { clientName: body['client_name'] } : {}),
