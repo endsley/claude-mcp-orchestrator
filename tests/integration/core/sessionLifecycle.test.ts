@@ -572,3 +572,78 @@ describe('cancelling a session while its worker is being rebuilt', () => {
     expect(store.getOrThrow(output.sessionId).status).toBe('working');
   });
 });
+
+/**
+ * Refusals that tell the user what to do next, and a listing that does not
+ * promise what the machine will refuse (endsley/bodhi-inbox#37).
+ *
+ * errorResult voices `message + hint`, so a refusal carrying no hint is a dead
+ * end spoken aloud on a phone. And a session listed as "can be resumed" that
+ * recoverWorker then refuses outright is worse than not listing it: the user
+ * retries, gets the identical refusal, and cannot tell it from a transient
+ * failure.
+ */
+describe('refusals say what to do next', () => {
+  it('tells the user to start a new session when this one has finished', async () => {
+    const output = await manager.startSession({ instruction: 'Start', project: 'demo' });
+    await manager.cancel(output.sessionId);
+
+    await expect(manager.sendInstruction(output.sessionId, 'more')).rejects.toMatchObject({
+      code: 'SESSION_NOT_ACCEPTING_INPUT',
+      hint: expect.stringMatching(/start a new work session/i),
+    });
+  });
+
+  it('explains where an answer went when nothing is waiting for one', async () => {
+    // The canonical shape: the question expired, work carried on, and the
+    // user answers anyway. Their answer goes nowhere; the message has to say
+    // so and name the way through.
+    const output = await manager.startSession({ instruction: 'Start', project: 'demo' });
+
+    // respond() is SYNCHRONOUS, so .rejects never applies -- the throw escapes
+    // the assertion entirely and the test fails on the raw error.
+    let thrown: unknown;
+    try {
+      manager.respond(output.sessionId, 'yes');
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({
+      code: 'PENDING_REQUEST_NOT_FOUND',
+      hint: expect.stringMatching(/new instruction/i),
+    });
+  });
+});
+
+describe('the active-work listing does not promise a resume that will fail', () => {
+  it('omits an interrupted session that is past its wall-clock cap', async () => {
+    const output = await manager.startSession({ instruction: 'Fix the nav', project: 'demo' });
+    manager.recoverOnStartup();
+    expect(store.getOrThrow(output.sessionId).status).toBe('interrupted');
+
+    // Interrupted a moment ago (so isFresh passes) but started long ago, which
+    // is exactly the combination that used to be advertised as resumable.
+    db.prepare('UPDATE work_sessions SET started_at = ? WHERE id = ?').run(
+      new Date(Date.now() - 999 * 60_000).toISOString(),
+      output.sessionId,
+    );
+
+    const context = await manager.getCompactActiveContext();
+    const rendered = context === null ? '' : JSON.stringify(context);
+    expect(rendered).not.toContain('can be resumed');
+
+    // And the refusal it would have produced is still the refusal.
+    await expect(manager.sendInstruction(output.sessionId, 'carry on')).rejects.toMatchObject({
+      code: 'SESSION_TIMED_OUT',
+    });
+  });
+
+  it('still lists one that genuinely can be resumed', async () => {
+    const output = await manager.startSession({ instruction: 'Fix the nav', project: 'demo' });
+    manager.recoverOnStartup();
+
+    const context = await manager.getCompactActiveContext();
+    expect(JSON.stringify(context)).toContain('can be resumed');
+    expect(JSON.stringify(context)).toContain(output.sessionId);
+  });
+});

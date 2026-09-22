@@ -135,6 +135,8 @@ export class PreferenceContextProvider implements InitialContextProvider {
   private readonly maxRules: number;
   private readonly preamble: string[];
   private cache?: { rules: string[]; at: number };
+  /** Instruction files that exist but could not be read on the last attempt. */
+  private unreadable: string[] = [];
 
   constructor(options: PreferenceProviderOptions | string[] = {}) {
     // Back-compat: an array used to mean "static summary lines".
@@ -153,14 +155,28 @@ export class PreferenceContextProvider implements InitialContextProvider {
   private async loadRules(): Promise<string[]> {
     // Instructions change rarely; re-reading them on every voice turn is waste.
     if (this.cache && Date.now() - this.cache.at < 60_000) return this.cache.rules;
+    // Reset only when actually re-reading. Clearing it on a cache HIT would
+    // make the warning disappear for the next minute while the gap it
+    // describes is still real.
+    this.unreadable = [];
 
     const collected: string[] = [];
     for (const file of this.files) {
       try {
         const text = await readFile(file, 'utf8');
         collected.push(...extractRules(text, this.maxRules));
-      } catch {
-        // A missing instruction file is normal on a fresh machine.
+      } catch (error) {
+        // A MISSING file is normal on a fresh machine. An unreadable one is
+        // not, and the two were indistinguishable: both produced a section
+        // titled "OPERATING RULES (the worker is bound by these)" with nothing
+        // under it, from which the only available conclusion is that the user
+        // has no standing rules. These are the constraints the user placed on
+        // the worker, so losing them silently is the worst direction to fail
+        // in -- the worker proceeds believing it is unconstrained.
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT') {
+          this.unreadable.push(`${file} could not be read (${code ?? 'unknown error'})`);
+        }
       }
       if (collected.length >= this.maxRules) break;
     }
@@ -171,10 +187,15 @@ export class PreferenceContextProvider implements InitialContextProvider {
 
   async getContext(_request: InitialContextRequest): Promise<InitialContextSection> {
     const rules = await this.loadRules();
+    // Said in the SECTION, not only in health(). A caller reaches health()
+    // through list_context_capabilities; the worker reads this text. If rules
+    // are missing because a file could not be read, the text has to say so, or
+    // the only reading available is "there are no rules".
+    const unreadable = this.unreadable.map((note) => `WARNING: ${note}; any rules it holds are missing here.`);
     return {
       providerId: this.id,
       title: 'OPERATING RULES (the worker is bound by these)',
-      lines: rules.length > 0 ? [...rules, ...this.preamble] : this.preamble,
+      lines: [...unreadable, ...(rules.length > 0 ? [...rules, ...this.preamble] : this.preamble)],
       // The first few rules are the ones that prevent damage; never trim to nothing.
       minLines: Math.min(4, rules.length || 1),
       relevance: 0.9,
@@ -184,6 +205,14 @@ export class PreferenceContextProvider implements InitialContextProvider {
 
   async health(): Promise<ProviderHealth> {
     const rules = await this.loadRules();
+    if (this.unreadable.length > 0) {
+      // Unreadable is a different state from absent, and a worse one.
+      return {
+        status: 'degraded',
+        detail: this.unreadable.join('; '),
+        checkedAt: new Date().toISOString(),
+      };
+    }
     return {
       status: rules.length > 0 ? 'ok' : 'degraded',
       detail: rules.length > 0 ? `${rules.length} rules extracted` : 'no instruction files found',

@@ -243,7 +243,16 @@ export class SessionManager {
       throw orchestratorError(
         'SESSION_NOT_ACCEPTING_INPUT',
         `work session ${sessionId} is "${session.status}" and cannot take another instruction`,
-        { details: { sessionId, status: session.status } },
+        {
+          details: { sessionId, status: session.status },
+          // errorResult voices message + hint, so a refusal without a hint is
+          // a dead end spoken aloud. "It failed, try again" is the single most
+          // likely thing a person says next, and it landed here.
+          hint:
+            session.status === 'starting'
+              ? 'It is still starting up. Try again in a moment.'
+              : 'Start a new work session. The finished one stays readable with get_work_session_status.',
+        },
       );
     }
 
@@ -269,6 +278,7 @@ export class SessionManager {
     const open = requestId ? this.store.getPendingRequestOrThrow(requestId) : this.store.getOpenRequest(sessionId);
     if (!open) {
       throw orchestratorError('PENDING_REQUEST_NOT_FOUND', `work session ${sessionId} is not waiting on anything`, {
+        hint: 'The question may have expired and the work continued without it. Send your answer as a new instruction instead.',
         details: { sessionId },
       });
     }
@@ -407,7 +417,15 @@ export class SessionManager {
     const active = recent.filter(
       (s) => s.status === 'working' || s.status === 'idle' || s.status === 'needs_input' || s.status === 'awaiting_approval',
     );
-    const resumable = recent.filter((s) => s.status === 'interrupted' && isFresh(s));
+    // Past-cap sessions are excluded: recoverWorker refuses them outright with
+    // SESSION_TIMED_OUT, so listing one as "can be resumed" is a promise the
+    // machine will not keep -- and the user retries it, gets the same refusal,
+    // and has no way to tell the difference from a transient failure. isFresh
+    // measures recency of the last update; the cap runs from startedAt, so a
+    // long session interrupted a moment ago satisfies one and fails the other.
+    const resumable = recent.filter(
+      (s) => s.status === 'interrupted' && isFresh(s) && !this.isPastLifetimeCap(s),
+    );
     const shown = [...active, ...resumable].slice(0, 3);
 
     const lines: string[] = [];
