@@ -176,6 +176,7 @@ export function createHttpApp(
         adminPassword,
         accessTokenTtlMs: config.server.auth.accessTokenTtlMs,
         refreshTokenTtlMs: config.server.auth.refreshTokenTtlMs,
+        refreshReplayGraceMs: config.server.auth.refreshReplayGraceMs,
         authorizationCodeTtlMs: config.server.auth.authorizationCodeTtlMs,
         store,
         logger,

@@ -14,6 +14,8 @@ export interface OAuthServerOptions {
   adminPassword: string;
   accessTokenTtlMs: number;
   refreshTokenTtlMs: number;
+  /** See server.auth.refreshReplayGraceMs; coupled to the client's timeout. */
+  refreshReplayGraceMs: number;
   authorizationCodeTtlMs: number;
   store: OAuthStore;
   logger: Logger;
@@ -452,10 +454,12 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
         // the former revokes the chain - a naive version without that
         // distinction turned an ordinary concurrent retry into a forced
         // re-consent.
-        const replay = store.classifyRefreshReplay(refreshToken);
+        const replay = store.classifyRefreshReplay(refreshToken, options.refreshReplayGraceMs);
         if (replay.verdict === 'theft') {
           logger.warn('refresh token reuse detected; revoked the rotation chain', {
             revoked: replay.revoked,
+            // True when a link was missing, so live descendants may remain.
+            truncated: replay.truncated === true,
           });
         }
         oauthError(res, 400, 'invalid_grant', 'refresh token is invalid, expired or already used');

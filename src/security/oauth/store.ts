@@ -328,7 +328,7 @@ export class OAuthStore {
     token: string,
     graceMs: number = REFRESH_REPLAY_GRACE_MS,
     now: Date = new Date(),
-  ): { verdict: 'retry' | 'theft' | 'unrelated'; revoked: number } {
+  ): { verdict: 'retry' | 'theft' | 'unrelated'; revoked: number; truncated?: boolean } {
     const row = this.db
       .prepare('SELECT kind, revoked_at, rotated_to FROM oauth_tokens WHERE token_hash = ?')
       .get(hashSecret(token)) as { kind: string; revoked_at: string | null; rotated_to: string | null } | undefined;
@@ -344,21 +344,30 @@ export class OAuthStore {
     // count as inside the window.
     if (graceMs > 0 && now.getTime() - rotatedAt <= graceMs) return { verdict: 'retry', revoked: 0 };
 
-    return { verdict: 'theft', revoked: this.revokeRotationChain(token, now) };
+    const outcome = this.revokeRotationChain(token, now);
+    return { verdict: 'theft', revoked: outcome.revoked, truncated: outcome.truncated };
   }
 
   /** Revoke every token reachable by following `rotated_to` forward. */
-  private revokeRotationChain(from: string, now: Date): number {
+  private revokeRotationChain(from: string, now: Date): { revoked: number; truncated: boolean } {
     const run = this.db.transaction(() => {
       let hash: string | undefined = hashSecret(from);
       const seen = new Set<string>();
       let revoked = 0;
+      let truncated = false;
       while (hash !== undefined && !seen.has(hash)) {
         seen.add(hash);
         const row = this.db
           .prepare('SELECT rotated_to, revoked_at FROM oauth_tokens WHERE token_hash = ?')
           .get(hash) as { rotated_to: string | null; revoked_at: string | null } | undefined;
-        if (row === undefined) break;
+        if (row === undefined) {
+          // The chain is cut: a link was pruned while a later one may still be
+          // live. Reachable only if refreshTokenTtlMs changed between
+          // rotations, which makes expiry non-monotonic. Leaving descendants
+          // unrevoked is bad enough without doing it silently.
+          truncated = true;
+          break;
+        }
         if (row.revoked_at === null) {
           this.db
             .prepare('UPDATE oauth_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL')
@@ -367,7 +376,7 @@ export class OAuthStore {
         }
         hash = row.rotated_to ?? undefined;
       }
-      return revoked;
+      return { revoked, truncated };
     });
     return run();
   }

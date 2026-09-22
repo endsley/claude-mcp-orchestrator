@@ -59,6 +59,24 @@ export const authConfigSchema = z.object({
   /** Short-lived by design; the refresh token carries longevity. */
   accessTokenTtlMs: z.number().int().min(60_000).default(3_600_000),
   refreshTokenTtlMs: z.number().int().min(300_000).default(2_592_000_000),
+  /**
+   * How long after a rotation a replay of the old refresh token counts as a
+   * benign retry rather than theft.
+   *
+   * MUST be at least as long as the client's own refresh-request timeout,
+   * and comfortably longer is better. A client whose HTTP timeout is 30s and
+   * which retries a dropped refresh lands at T+30s; if the grace is shorter
+   * than that, the retry is classified as theft, the chain is revoked, and
+   * the user is pushed back through consent for nothing - the precise false
+   * positive this window exists to prevent. The default assumes a phone on a
+   * poor link. Two times the client timeout is a reasonable rule.
+   *
+   * The cost of a longer window is detection latency, and it is smaller than
+   * it looks: the grace suppresses the victim's immediate duplicate either
+   * way, so a lost rotation race is caught on the victim's NEXT scheduled
+   * refresh - bounded by refresh cadence, not by this value.
+   */
+  refreshReplayGraceMs: z.number().int().min(0).default(60_000),
   authorizationCodeTtlMs: z.number().int().min(10_000).default(120_000),
 });
 

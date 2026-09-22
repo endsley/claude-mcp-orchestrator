@@ -96,6 +96,46 @@ describe('classifyRefreshReplay', () => {
     expect(subject.classifyRefreshReplay(access.token, 0).verdict).toBe('unrelated');
   });
 
+  /**
+   * The gap Bodhi found in this suite: every other test here passes against
+   * an implementation that responds to theft by calling revokeClientTokens,
+   * nuking every session the client has. Revocation must be scoped to the
+   * compromised chain, and nothing pinned that.
+   */
+  it('leaves an unrelated chain of the same client alone', () => {
+    const subject = store();
+    const client = subject.registerClient({ redirectUris: ['https://claude.ai/cb'] });
+    const mint = (): string =>
+      subject.issueToken({
+        kind: 'refresh', clientId: client.clientId, audience: 'https://x/mcp', scope: 'mcp', ttlMs: 600_000,
+      }).token;
+
+    // Two independent sessions for the same client - a phone and a laptop.
+    const compromised = mint();
+    const innocent = mint();
+    const compromisedNext = subject.rotateRefreshToken(compromised, 600_000)!.next.token;
+    const innocentNext = subject.rotateRefreshToken(innocent, 600_000)!.next.token;
+
+    const verdict = subject.classifyRefreshReplay(compromised, 0);
+    expect(verdict.verdict).toBe('theft');
+
+    // The stolen chain dies...
+    expect(subject.lookupToken(compromisedNext, 'refresh')).toBeUndefined();
+    // ...and the other session keeps working.
+    expect(subject.lookupToken(innocentNext, 'refresh')).toBeDefined();
+  });
+
+  it('reports a truncated walk so missed descendants are visible', () => {
+    const subject = store();
+    const { r1, r2 } = chainOfTwo(subject);
+    const third = subject.rotateRefreshToken(r2, 600_000);
+    if (!third) throw new Error('second rotation should have succeeded');
+
+    const intact = subject.classifyRefreshReplay(r1, 0);
+    expect(intact.verdict).toBe('theft');
+    expect(intact.truncated).toBe(false);
+  });
+
   it('revokes a longer chain, not just the next link', () => {
     const subject = store();
     const { r1, r2 } = chainOfTwo(subject);
