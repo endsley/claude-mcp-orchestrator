@@ -329,3 +329,48 @@ describe('an unknown tool is not a safe tool', () => {
     expect(decision.reason).toMatch(/not known to this classifier/i);
   });
 });
+
+/**
+ * A regression I introduced one commit earlier, caught by checking my own
+ * change against the SDK rather than against my assumptions.
+ *
+ * Making unrecognised tools ask is the right default, and it immediately
+ * mis-fired: the classifier knows 17 tool names and the installed SDK declares
+ * far more. The worker is started with permissionMode 'plan' for inspect
+ * sessions, so ExitPlanMode is a designed-in step of an ordinary session --
+ * asking the user to approve the model finishing its plan is not a boundary,
+ * it is the kind of papercut that teaches people to tap Allow unread, which
+ * costs more safety than the prompt buys.
+ *
+ * The names below were read out of
+ * node_modules/@anthropic-ai/claude-agent-sdk/sdk-tools.d.ts, not guessed.
+ */
+describe('the SDK control verbs do not interrupt the user', () => {
+  it.each(['ExitPlanMode', 'EnterPlanMode', 'KillShell', 'KillBash'])(
+    '%s is allowed without asking',
+    (toolName) => {
+      const decision = classifyToolCall({ toolName, input: {}, scope });
+      expect(decision.class).toBe('READ_ONLY');
+    },
+  );
+
+  it('allows a slash command, whose expansion is classified call by call', () => {
+    // The invocation grants nothing on its own: it expands to a prompt, and
+    // every tool call that expansion makes comes back through this classifier.
+    expect(classifyToolCall({ toolName: 'SlashCommand', input: { command: '/deploy' }, scope }).class).toBe('LOCAL_REVERSIBLE');
+  });
+
+  it('still asks about a tool it genuinely does not know', () => {
+    // The point of the previous commit must survive this one.
+    for (const toolName of ['SomeFutureTool', 'RemoteTrigger', 'PushNotification']) {
+      expect(classifyToolCall({ toolName, input: {}, scope }).class).toBe('EXTERNAL_SIDE_EFFECT');
+    }
+  });
+
+  it('does not let a control verb become a way round the file rules', () => {
+    // If a control tool ever carried a path, the sensitive-path check runs
+    // before the control branch, so it cannot be used to reach a credential.
+    const decision = classifyToolCall({ toolName: 'ExitPlanMode', input: { file_path: '/tmp/project/.env' }, scope });
+    expect(decision.class).toBe('PROHIBITED');
+  });
+});

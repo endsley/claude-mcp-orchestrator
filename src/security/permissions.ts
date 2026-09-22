@@ -44,6 +44,24 @@ const READ_ONLY_TOOLS = new Set([
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'ApplyPatch']);
 
 /**
+ * Tools that change only the session's own control state.
+ *
+ * These exist because the previous commit made an unrecognised tool ASK, which
+ * is the right default and immediately mis-fired on the SDK's control verbs.
+ * The worker is started with `permissionMode: 'plan'` for inspect sessions, so
+ * ExitPlanMode is a designed-in step of a normal session -- prompting the user
+ * to approve the model finishing its plan is not a security boundary, it is a
+ * papercut that teaches people to tap Allow without reading.
+ *
+ * Verified against the installed SDK's own declarations rather than guessed:
+ * node_modules/@anthropic-ai/claude-agent-sdk/sdk-tools.d.ts lists these names.
+ * Nothing here touches the filesystem, the network, or any state outside this
+ * process; anything that does must stay out of this set and be classified on
+ * what it actually does.
+ */
+const CONTROL_TOOLS = new Set(['EnterPlanMode', 'ExitPlanMode', 'KillShell', 'KillBash']);
+
+/**
  * Shell control operators that start a NEW command. Splitting on these is what
  * stops `ls && rm -rf ~` from being classified by its harmless prefix.
  */
@@ -417,6 +435,28 @@ export function classifyToolCall(options: ClassifyOptions): PermissionClassifica
       class: 'LOCAL_REVERSIBLE',
       reason: 'edits a file inside the project',
       summary: `${toolName} ${paths[0] ?? '(file)'}`,
+      ...(paths.length > 0 ? { paths } : {}),
+    };
+  }
+
+  if (CONTROL_TOOLS.has(toolName)) {
+    return {
+      class: 'READ_ONLY',
+      reason: 'changes only this session\'s own control state',
+      summary: `${toolName}`,
+      ...(paths.length > 0 ? { paths } : {}),
+    };
+  }
+
+  if (toolName === 'SlashCommand') {
+    // The invocation itself grants nothing: a slash command expands to a
+    // prompt, and every tool call that expansion makes comes back through this
+    // classifier on its own merits. Local-reversible because the expansion
+    // usually does edit the project.
+    return {
+      class: 'LOCAL_REVERSIBLE',
+      reason: 'runs a user-defined command whose own tool calls are classified individually',
+      summary: `SlashCommand`,
       ...(paths.length > 0 ? { paths } : {}),
     };
   }
