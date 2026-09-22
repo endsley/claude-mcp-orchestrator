@@ -8,6 +8,30 @@ const execFile = promisify(execFileCallback);
 
 interface CacheEntry { value: SystemStatus; expiresAt: number }
 
+/**
+ * Parse `nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits`.
+ *
+ * nvidia-smi emits ONE LINE PER GPU. Splitting the whole output on ',' made
+ * the third field of a two-GPU box "1234\nNVIDIA RTX A4000", so Number() gave
+ * NaN, memory use was silently dropped, and GPU 2+ vanished entirely.
+ *
+ * Pure and exported so the multi-GPU case can be tested without a GPU.
+ */
+export function parseGpuCsv(stdout: string): SystemStatus['gpu'] | undefined {
+  const lines = stdout.trim().split('\n').map((line) => line.trim()).filter(Boolean);
+  const first = lines[0];
+  if (first === undefined) return undefined;
+  const [name, total, used] = first.split(',').map((item) => item.trim());
+  if (!name || !total || !Number.isFinite(Number(total))) return undefined;
+  const result: NonNullable<SystemStatus['gpu']> = { name, memoryTotalMiB: Number(total) };
+  if (used !== undefined && Number.isFinite(Number(used))) result.memoryUsedMiB = Number(used);
+  // The shape reports a single GPU. Say which, rather than let a multi-GPU
+  // box look like a single-GPU one - "the GPU machine" is a thing people ask
+  // about, and a silent undercount is worse than an awkward name.
+  if (lines.length > 1) result.name = `${name} (1 of ${lines.length} GPUs)`;
+  return result;
+}
+
 export class SystemStatusService {
   private cache: CacheEntry | undefined;
 
@@ -49,11 +73,7 @@ export class SystemStatusService {
         maxBuffer: 8_000,
         encoding: 'utf8',
       });
-      const [name, total, used] = stdout.trim().split(',').map((item) => item.trim());
-      if (!name || !total || !Number.isFinite(Number(total))) return undefined;
-      const result: NonNullable<SystemStatus['gpu']> = { name, memoryTotalMiB: Number(total) };
-      if (used !== undefined && Number.isFinite(Number(used))) result.memoryUsedMiB = Number(used);
-      return result;
+      return parseGpuCsv(stdout);
     } catch {
       return undefined;
     }

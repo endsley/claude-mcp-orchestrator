@@ -34,8 +34,12 @@ export class TailscaleClient {
     try {
       stdout = await this.runner.run(this.executable, ['status', '--json'], this.timeoutMs);
     } catch (error) {
+      // A timeout or a busy daemon is worth retrying. A missing binary is not:
+      // ENOENT will be ENOENT next time too, and advertising it as retryable
+      // invites a caller to loop on something that can never succeed.
+      const missingBinary = (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
       throw orchestratorError('TAILSCALE_UNAVAILABLE', 'Tailscale status is unavailable.', {
-        retryable: true,
+        retryable: !missingBinary,
         cause: error,
       });
     }

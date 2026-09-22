@@ -51,7 +51,15 @@ export class KvCache {
     this.db.prepare('DELETE FROM kv_cache WHERE namespace = ?').run(namespace);
   }
 
-  /** Drop expired rows. Called periodically; safe to call concurrently. */
+  /**
+   * Drop expired rows. Safe to call concurrently.
+   *
+   * Called once at startup (app.ts) and nowhere else - the comment used to
+   * claim it ran periodically, which was never true. It does not matter
+   * today: nothing in src/ calls get() or set(), so kv_cache is never
+   * written and cannot grow. If a consumer is ever added, this needs a timer
+   * like the OAuth store's.
+   */
   pruneExpired(now = new Date()): number {
     const result = this.db
       .prepare('DELETE FROM kv_cache WHERE expires_at IS NOT NULL AND expires_at <= ?')
