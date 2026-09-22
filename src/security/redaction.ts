@@ -33,6 +33,8 @@ const SENSITIVE_WORDS = new Set([
   'tokens',
   'credential',
   'credentials',
+  // The abbreviation is as common as the word in logs and config.
+  'creds',
   'apikey',
   'authorization',
   'cookie',
@@ -239,9 +241,44 @@ function looksLikeCredential(value: string): boolean {
   return true;
 }
 
+/**
+ * Whether a value NAMES a secret rather than being one.
+ *
+ * This layer runs over every tool result, and reading source is the main thing
+ * this product does -- so `const apiKey = process.env.MEM0_API_KEY;` arriving
+ * at the model as `const apiKey = [redacted];` costs it the one fact the line
+ * carried. Same for `this.token = options.token`, `password = getPassword()`
+ * and `apiKey = undefined`. None of them contains a credential; all of them
+ * were scrubbed.
+ *
+ * Deliberately narrow. Only shapes no credential format uses:
+ *
+ *   a dotted path      process.env.MEM0_API_KEY, req.headers.authorization
+ *   a call             getPassword(), readSecret()
+ *   a language literal null, undefined, true, false, "" and ''
+ *   a placeholder      <paste yours>, $(cat token.txt)
+ *
+ * A BARE single identifier is NOT in the list, even though `token = someVar`
+ * is just as harmless, because `api_key=abc123def456` has exactly that shape
+ * and is a real leak. Missing a harmless case costs a line of diagnostics;
+ * missing that one costs a credential, so the residue stays on the safe side.
+ */
+function namesRatherThanHolds(value: string): boolean {
+  if (value === 'null' || value === 'undefined' || value === 'true' || value === 'false') return true;
+  if (value === '""' || value === "''" || value === '') return true;
+  // A placeholder or a shell substitution: both are instructions to the
+  // reader, not values.
+  if (value.startsWith('<') || value.startsWith('$(') || value.startsWith('${')) return true;
+  // Dotted path or call. The dot or the parentheses are what make it safe to
+  // recognise; a single identifier would not be.
+  return /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+(?:\(\s*\))?$/.test(value) ||
+    /^[A-Za-z_$][\w$]*\(\s*\)$/.test(value);
+}
+
 /** Whether `key = value` in free text should have its value scrubbed. */
 function assignmentIsSecret(key: string, value: string): boolean {
   if (!isSensitiveKey(key)) return false;
+  if (namesRatherThanHolds(value)) return false;
   const words = keyWords(key);
   if (words.length > 1) return true;
   if (key === key.toUpperCase() && /[A-Z]/.test(key)) return true;

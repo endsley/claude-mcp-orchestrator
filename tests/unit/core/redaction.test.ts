@@ -524,3 +524,97 @@ describe('enumerating an object is as fallible as reading it', () => {
     expect(String((redactValue({ h: hostile }) as Record<string, unknown>)['h'])).toContain('unreadable');
   });
 });
+
+/**
+ * Text that NAMES a secret without containing one.
+ *
+ * Found by asking the inverted question of this layer -- not "what leaks" but
+ * "what does this destroy" -- after the same inversion turned up seventeen
+ * false positives in the permission classifier that five vulnerability-focused
+ * reviews had missed. Over-redaction has the same asymmetry as an
+ * over-aggressive permission rule: a leak is visible once you look for it, and
+ * a destroyed log line is invisible, because whoever reads it does not know
+ * what used to be there.
+ *
+ * This matters here more than in most codebases, because reading source is the
+ * main thing the product does. `const apiKey = process.env.MEM0_API_KEY;`
+ * arriving at the model as `const apiKey = [redacted];` costs it the single
+ * fact the line carried.
+ */
+describe('redactText keeps code that only names a secret', () => {
+  it.each([
+    'const apiKey = process.env.MEM0_API_KEY;',
+    'const token = req.headers.authorization;',
+    'password = getPassword()',
+    'apiKey: config.apiKey,',
+    'secret = process.env.SECRET',
+    'this.token = options.token;',
+  ])('%s survives', (line) => {
+    expect(redactText(line)).toBe(line);
+  });
+
+  it.each(['apiKey = undefined', 'token = null', 'password = ""', 'secret = false'])(
+    '%s survives, because a literal holds nothing',
+    (line) => {
+      expect(redactText(line)).toBe(line);
+    },
+  );
+
+  it('keeps placeholders in a template or a shell line', () => {
+    expect(redactText('MEM0_API_KEY=<paste yours>')).toBe('MEM0_API_KEY=<paste yours>');
+    expect(redactText('export TOKEN=$(cat token.txt)')).toBe('export TOKEN=$(cat token.txt)');
+  });
+
+  it('still destroys a value that IS the secret', () => {
+    // The narrowing recognises dotted paths, calls, literals and placeholders,
+    // and nothing else. A bare identifier is deliberately NOT in that list,
+    // because `api_key=abc123def456` has exactly that shape.
+    for (const [line, secret] of [
+      ['api_key=abc123def456ghi789', 'abc123def456ghi789'],
+      ['password=hunter2hunter2', 'hunter2hunter2'],
+      ['token=a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0'],
+      ['ENCRYPTION_KEY=FAKE1234567890abcdef', 'FAKE1234567890abcdef'],
+      ['password="correct horse battery staple"', 'battery staple'],
+    ] as const) {
+      expect(redactText(line)).not.toContain(secret);
+    }
+  });
+
+  it('knows the abbreviation as well as the word', () => {
+    // Pre-existing gap, surfaced while checking the above: "credentials" was
+    // in the vocabulary and "creds" was not.
+    expect(isSensitiveKey('creds')).toBe(true);
+    expect(redactText('creds=m0-SUPERSECRETKEYVALUE')).not.toContain('m0-SUPERSECRETKEYVALUE');
+  });
+});
+
+/**
+ * The counterweight, measured rather than assumed: twenty realistic diagnostic
+ * strings containing no secret at all, none of which may be touched.
+ */
+describe('redactText leaves ordinary diagnostics exactly alone', () => {
+  it.each([
+    '{"level":30,"time":1700000000,"component":"http","route":"/mcp","status":200,"elapsedMs":12}',
+    "TypeError: Cannot read properties of undefined (reading 'id')\n    at SessionStore.get (/app/src/sessionStore.ts:146:22)",
+    'Tests  537 passed (537)   Duration 3.21s',
+    "On branch master\nYour branch is up to date with 'origin/master'.",
+    "src/a.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.",
+    'The host key for github.com was accepted',
+    "SELECT id, name FROM work_sessions WHERE status = 'idle' LIMIT 40",
+    'GET /api/projects?limit=20&offset=0 200 14ms',
+    'server:\n  host: 127.0.0.1\n  port: 8788\n  timeoutMs: 30000',
+    'maxTokens: 4000, estimatedTokens: 1200, cacheReadInputTokens: 900',
+    'interface Options { apiKey?: string; userId: string; }',
+    '{"type":"object","properties":{"token":{"type":"string"}}}',
+    'id,name,secret_santa_partner,created_at',
+    'The secret to good tests is making them fail first.',
+    'const keyBindings = { escape: close, enter: submit };',
+    'https://github.com/endsley/claude-mcp-orchestrator/blob/master/README.md',
+    'signature verification took 12ms',
+    'const { apiKey } = options;',
+    'if (!config.apiKey) throw new Error("missing");',
+    'headers["X-API-Key"] = apiKey;',
+  ])('leaves %# alone', (line) => {
+    expect(redactText(line)).toBe(line);
+  });
+});
