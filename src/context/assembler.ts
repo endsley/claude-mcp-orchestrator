@@ -54,7 +54,7 @@ async function timed<T>(operation: (signal: AbortSignal) => Promise<T>, timeoutM
  */
 export class ContextAssembler {
   /** Opt-in per-provider section cache, keyed by provider and request shape. */
-  private readonly sectionCache = new Map<string, { section: InitialContextSection | null; expiresAt: number }>();
+  private readonly sectionCache = new Map<string, { section: InitialContextSection | null; expiresAt: number; budget: number }>();
 
   constructor(
     private readonly registry: ContextProviderRegistry,
@@ -198,7 +198,14 @@ export class ContextAssembler {
     const cacheKey = cacheTtlMs > 0 ? `${providerId}|${profile}|${input.focus ?? ''}|${input.projectId ?? ''}|${input.computerId ?? ''}` : undefined;
     if (cacheKey !== undefined) {
       const hit = this.sectionCache.get(cacheKey);
-      if (hit !== undefined && hit.expiresAt > Date.now()) {
+      // Serve down, never up. InitialContextRequest.maxTokens is a budget the
+      // provider is invited to respect, and some do - the memory provider
+      // trims its own lines to it - so a section cached under a SMALL budget
+      // is genuinely shorter than the same request would produce under a
+      // large one, and fitSection can only trim further, never recover the
+      // dropped lines. Reusing it upward would silently serve a truncated
+      // section for the rest of the TTL.
+      if (hit !== undefined && hit.expiresAt > Date.now() && maxTokens <= hit.budget) {
         return {
           providerId,
           section: hit.section === null ? null : { ...hit.section, cached: true },
@@ -253,7 +260,7 @@ export class ContextAssembler {
         throw new Error('Provider returned malformed context.');
       }
       if (cacheKey !== undefined) {
-        this.sectionCache.set(cacheKey, { section, expiresAt: Date.now() + cacheTtlMs });
+        this.sectionCache.set(cacheKey, { section, expiresAt: Date.now() + cacheTtlMs, budget: maxTokens });
         // Bound the cache so a long-running server with many focus strings
         // cannot grow it without limit.
         if (this.sectionCache.size > 200) {
