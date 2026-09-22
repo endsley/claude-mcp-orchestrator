@@ -118,9 +118,16 @@ export const securityConfigSchema = z.object({
   filesystem: filesystemSecuritySchema.prefault({}),
   approvals: approvalPolicySchema.prefault({}),
   /**
-   * How long a pending question/approval waits before the session is marked
-   * failed. Voice users walk away; this stops a worker pinning a project lock
-   * forever.
+   * How long a pending question or approval waits for an answer.
+   *
+   * On expiry the request is voided and the approval FAILS CLOSED: the tool is
+   * denied and the worker carries on without it (see handleToolPermission in
+   * services/claude/worker.ts). The session is deliberately NOT failed - an
+   * earlier version of this comment said it was, which was wrong, and acting
+   * on that claim would kill work that correctly continued after a denial.
+   *
+   * What actually stops a worker pinning a project lock forever is the
+   * wall-clock cap, claude.sessionTimeoutMs, enforced by the session reaper.
    */
   pendingRequestTimeoutMs: z.number().int().min(10_000).default(1_800_000),
 });

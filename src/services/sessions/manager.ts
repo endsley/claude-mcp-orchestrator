@@ -96,6 +96,8 @@ export class SessionManager {
   private readonly activeContext: ActiveContextStore;
   private readonly logger: Logger;
 
+  private reaperTimer?: NodeJS.Timeout;
+
   constructor(private readonly deps: SessionManagerDeps) {
     this.store = deps.store;
     this.broker = deps.broker;
@@ -702,7 +704,70 @@ export class SessionManager {
   }
 
   /** Stop every worker. Used on shutdown. */
+  /**
+   * Fail sessions that have outlived `claude.sessionTimeoutMs`.
+   *
+   * That setting was declared and documented as a "wall-clock cap for a single
+   * work session" but read nowhere, so nothing ever enforced it. `maxTurns`
+   * bounds agentic turns within one conversation, not elapsed time, so a
+   * session that stalled - a worker waiting on something that never comes, a
+   * client that walked away - held its Claude child process and, if it was
+   * write-capable, that project's write lock, for as long as the server ran.
+   *
+   * Reaping goes through failSession, which is already the audited path: it
+   * writes a terminal status, releases the write lock in the same transaction,
+   * and disposes the worker. Exposed rather than private so it can be tested
+   * against a clock instead of a timer.
+   */
+  reapExpiredSessions(nowMs: number = Date.now()): string[] {
+    const cap = this.deps.claudeConfig.sessionTimeoutMs;
+    const reaped: string[] = [];
+    // `interrupted` is included deliberately. Recovery marks a session
+    // interrupted and lets it KEEP its write lock so it can be resumed, but
+    // nothing ever re-lists it, so one that is never resumed nor cancelled
+    // pins that project forever. A session already past its total wall-clock
+    // cap cannot legitimately resume, so the same cap retires it - rather
+    // than inventing a second, separate staleness policy for interrupted.
+    const candidates = [...this.store.listResumable(), ...this.store.list({ status: 'interrupted' })];
+    for (const session of candidates) {
+      const startedAt = Date.parse(session.startedAt ?? session.createdAt);
+      // An unparseable timestamp is not a reason to kill someone's work.
+      if (!Number.isFinite(startedAt)) continue;
+      if (nowMs - startedAt <= cap) continue;
+      this.failSession(
+        session.id,
+        orchestratorError(
+          'SESSION_ALREADY_FINISHED',
+          `work session exceeded its ${Math.round(cap / 60_000)} minute wall-clock cap and was ended`,
+        ),
+      );
+      reaped.push(session.id);
+    }
+    return reaped;
+  }
+
+  /** Begin periodic reaping. Idempotent; the timer never holds the process open. */
+  startReaper(intervalMs = 60_000): void {
+    if (this.reaperTimer !== undefined) return;
+    this.reaperTimer = setInterval(() => {
+      try {
+        const reaped = this.reapExpiredSessions();
+        if (reaped.length > 0) this.logger.warn('reaped timed-out work sessions', { count: reaped.length, sessions: reaped });
+      } catch (error) {
+        // A failed sweep must never take the server down with it.
+        this.logger.warn('session reaper failed', { err: error });
+      }
+    }, intervalMs);
+    this.reaperTimer.unref();
+  }
+
+  stopReaper(): void {
+    if (this.reaperTimer !== undefined) clearInterval(this.reaperTimer);
+    this.reaperTimer = undefined;
+  }
+
   async shutdown(): Promise<void> {
+    this.stopReaper();
     await Promise.all([...this.workers.values()].map((worker) => worker.dispose()));
     this.workers.clear();
   }

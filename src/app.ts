@@ -145,6 +145,8 @@ export async function buildApplication(options: BuildApplicationOptions = {}): P
     securityConfig: config.security,
     logger,
   });
+  // Nothing enforced claude.sessionTimeoutMs before this call.
+  sessions.startReaper();
 
   // ---- context assembly
   const registry = new ContextProviderRegistry();
