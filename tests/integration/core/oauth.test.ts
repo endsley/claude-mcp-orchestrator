@@ -401,7 +401,13 @@ describe('end-to-end authorization', () => {
       code_verifier: randomBytes(48).toString('base64url'),
     });
     expect(res.status).toBe(400);
-    expect(((await res.json()) as any).error_description).toMatch(/PKCE/i);
+    // Deliberately NOT asserting that the description names PKCE. It used to,
+    // which meant this test was pinning a state oracle in place: the four ways
+    // a code redemption can fail were distinguishable by description, so a
+    // code holder could probe whether the code existed and which client and
+    // redirect it belonged to. What matters is that a wrong verifier is
+    // refused; the reason now reaches the operator through the log only.
+    expect(((await res.json()) as any).error).toBe('invalid_grant');
   });
 });
 

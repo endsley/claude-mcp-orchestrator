@@ -59,7 +59,16 @@ class FixedWindowThrottle {
   check(key: string): boolean {
     const now = Date.now();
     const entry = this.attempts.get(key);
-    if (!entry || entry.resetAt <= now) return true;
+    if (!entry) return true;
+    if (entry.resetAt <= now) {
+      // Drop it rather than leaving it to sit forever. Behind the tunnel
+      // there is effectively one key so this was latent, but the server
+      // supports non-loopback binds, where every distinct source address
+      // left a permanent entry and a slow drip of addresses grew the map
+      // without limit.
+      this.attempts.delete(key);
+      return true;
+    }
     return entry.count < this.limit;
   }
 
@@ -388,21 +397,42 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
       const verifier = typeof body['code_verifier'] === 'string' ? body['code_verifier'] : '';
       const clientId = typeof body['client_id'] === 'string' ? body['client_id'] : '';
 
+      // Every rejection below answers with the SAME description. The four
+      // reasons used to be distinguishable - "invalid, expired or already
+      // used" versus "not issued to this client" versus "redirect_uri does
+      // not match" versus "PKCE verification failed" - which let anyone
+      // holding a code probe server state: whether the code exists, which
+      // client it belongs to, and which redirect was registered. The specific
+      // reason is logged instead, so an operator debugging a real client
+      // still gets it while a caller learns only that the grant failed.
+      //
+      // Note the deliberate ordering: the code is consumed BEFORE these
+      // checks, so a failed redemption burns it. That is intended. OAuth 2.1
+      // requires single use and recommends invalidating a code on suspected
+      // abuse, and an attacker who intercepted a code and guesses at the
+      // verifier should destroy it rather than be allowed to retry. The cost
+      // is that a buggy client forces a fresh consent, which is an annoyance
+      // rather than a weakness.
+      const denyGrant = (reason: string): void => {
+        logger.warn('authorization code rejected', { reason, clientId: clientId || undefined });
+        oauthError(res, 400, 'invalid_grant', 'authorization code is invalid, expired or already used');
+      };
+
       const record = store.consumeAuthorizationCode(code);
       if (!record) {
-        oauthError(res, 400, 'invalid_grant', 'authorization code is invalid, expired or already used');
+        denyGrant('unknown, expired or already used');
         return;
       }
       if (record.clientId !== clientId) {
-        oauthError(res, 400, 'invalid_grant', 'code was not issued to this client');
+        denyGrant('client mismatch');
         return;
       }
       if (record.redirectUri !== redirectUri) {
-        oauthError(res, 400, 'invalid_grant', 'redirect_uri does not match the authorization request');
+        denyGrant('redirect_uri mismatch');
         return;
       }
       if (!verifyPkce(verifier, record.codeChallenge, record.codeChallengeMethod)) {
-        oauthError(res, 400, 'invalid_grant', 'PKCE verification failed');
+        denyGrant('pkce verification failed');
         return;
       }
 

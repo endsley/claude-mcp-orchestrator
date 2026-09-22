@@ -176,3 +176,52 @@ describe('single-use under concurrency', () => {
     expect(reuse.filter((response) => response.status === 200)).toHaveLength(1);
   }, 30_000);
 });
+
+/**
+ * A caller holding a code should learn only that the grant failed - not
+ * whether the code exists, which client it belongs to, or which redirect_uri
+ * was registered. The four reasons used to be distinguishable by
+ * error_description, which made the endpoint a state oracle.
+ */
+describe('failed grants do not leak server state', () => {
+  async function failedGrant(overrides: Record<string, string>): Promise<{ error: string; description?: string }> {
+    const { code, verifier, clientId } = await authorizeToCode();
+    const res = await form('/oauth/token', {
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: REDIRECT_URI,
+      client_id: clientId,
+      code_verifier: verifier,
+      ...overrides,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; error_description?: string };
+    return { error: body.error, description: body.error_description };
+  }
+
+  it('answers identically for a wrong verifier, a wrong client and a wrong redirect', async () => {
+    const wrongVerifier = await failedGrant({ code_verifier: 'not-the-verifier-at-all' });
+    const wrongClient = await failedGrant({ client_id: 'client-that-does-not-own-it' });
+    const wrongRedirect = await failedGrant({ redirect_uri: 'https://claude.ai/somewhere-else' });
+
+    expect(wrongVerifier.error).toBe('invalid_grant');
+    // Distinguishable descriptions are what let a code holder probe state.
+    expect(wrongClient.description).toBe(wrongVerifier.description);
+    expect(wrongRedirect.description).toBe(wrongVerifier.description);
+  }, 30_000);
+
+  it('answers the same for a code that never existed', async () => {
+    const real = await failedGrant({ code_verifier: 'not-the-verifier-at-all' });
+    const { clientId } = await authorizeToCode();
+    const res = await form('/oauth/token', {
+      grant_type: 'authorization_code',
+      code: 'a-code-that-was-never-issued',
+      redirect_uri: REDIRECT_URI,
+      client_id: clientId,
+      code_verifier: 'whatever',
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error_description?: string };
+    expect(body.error_description).toBe(real.description);
+  }, 30_000);
+});
