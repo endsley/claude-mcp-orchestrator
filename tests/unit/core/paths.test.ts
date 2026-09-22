@@ -100,3 +100,54 @@ describe('resolveExistingAncestor', () => {
     expect(resolveExistingAncestor('/definitely/not/here/file.txt')).toBe('/definitely/not/here/file.txt');
   });
 });
+
+/**
+ * The deny loop tests BOTH the lexical path and the symlink-resolved one.
+ * Every existing deny test used a lexically-denied path, so dropping the
+ * realpath arm passed the whole suite: a symlink inside the project pointing
+ * into a denied directory would then have resolved to allowed.
+ */
+describe('denied locations cannot be reached through a symlink', () => {
+  let symRoot: string;
+  let symProject: string;
+  let symScope: FilesystemScope;
+
+  beforeAll(() => {
+    symRoot = mkdtempSync(join(tmpdir(), 'scope-deny-'));
+    symProject = join(symRoot, 'project');
+    const secrets = join(symProject, 'private');
+    mkdirSync(secrets, { recursive: true });
+    writeFileSync(join(secrets, 'key.pem'), 'PRIVATE KEY');
+    // Lexically OUTSIDE private/, but resolves inside it.
+    symlinkSync(secrets, join(symProject, 'shortcut'));
+
+    symScope = new FilesystemScope({
+      projectRoots: [symProject],
+      additionalReadablePaths: [],
+      deniedPaths: [secrets],
+      allowOutsideProjectRead: false,
+      allowOutsideProjectWrite: false,
+    });
+  });
+
+  it('refuses the denied directory named directly', () => {
+    const decision = symScope.check(join(symProject, 'private', 'key.pem'), 'read');
+    expect(decision.allowed).toBe(false);
+  });
+
+  it('refuses a symlink whose target is inside the denied directory', () => {
+    // Lexical check alone cannot catch this: the candidate path contains no
+    // "private" segment at all.
+    const viaLink = join(symProject, 'shortcut', 'key.pem');
+    expect(viaLink).not.toContain('private');
+
+    const decision = symScope.check(viaLink, 'read');
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toMatch(/denied/i);
+  });
+
+  it('still allows an ordinary file in the project', () => {
+    writeFileSync(join(symProject, 'ok.ts'), 'export {};');
+    expect(symScope.check(join(symProject, 'ok.ts'), 'read').allowed).toBe(true);
+  });
+});

