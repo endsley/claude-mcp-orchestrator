@@ -12,6 +12,9 @@ import type { ProjectGitState } from '../../types/projects.js';
 
 const execFile = promisify(execFileCallback);
 
+/** How many projects are inspected at once during a cold scan. */
+const PROJECT_SCAN_CONCURRENCY = 8;
+
 export interface ProjectRegistryOptions {
   roots: string[];
   metadata?: Record<string, ProjectMetadata>;
@@ -167,6 +170,31 @@ async function detectDescription(path: string): Promise<string | undefined> {
   return undefined;
 }
 
+/**
+ * Map with a ceiling on how many run at once.
+ *
+ * Discovery was strictly serial, and each project costs up to four `git`
+ * subprocesses plus a handful of file reads, so a cold scan of ~28 projects
+ * spawned 100+ processes one after another before the first voice turn could
+ * get its context. Bounded rather than unbounded because the work is process
+ * spawning: firing all of it at once trades a latency problem for a fork
+ * storm.
+ */
+async function mapBounded<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const output: R[] = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const index = next;
+      next += 1;
+      if (index >= items.length) return;
+      output[index] = await fn(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, () => worker()));
+  return output;
+}
+
 async function isProjectCandidate(path: string): Promise<boolean> {
   const indicators = ['.git', 'package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod', 'CLAUDE.md', 'README.md'];
   return (await Promise.all(indicators.map((indicator) => readable(join(path, indicator))))).some(Boolean);
@@ -232,18 +260,19 @@ export class ProjectRegistry {
           queue.push({ path: join(current.path, entry.name), depth: current.depth + 1 });
         }
       }
-      for (const candidate of candidates) {
+      const built = await mapBounded(candidates, PROJECT_SCAN_CONCURRENCY, async (candidate): Promise<Project | null> => {
         let path: string;
         try {
           path = await realpath(candidate);
         } catch {
-          continue;
+          return null;
         }
-        if (!containsPath(root, path) || !(await isProjectCandidate(path))) continue;
+        if (!containsPath(root, path) || !(await isProjectCandidate(path))) return null;
         const metadata = this.metadata[path] ?? this.metadata[basename(path)];
-        if (metadata?.ignore) continue;
-        projects.push(await this.toProject(path));
-      }
+        if (metadata?.ignore) return null;
+        return this.toProject(path);
+      });
+      projects.push(...built.flatMap((project) => (project === null ? [] : [project])));
     }
     const unique = [...new Map(projects.map((project) => [project.path, project])).values()]
       .sort((left, right) => left.displayName.localeCompare(right.displayName));
