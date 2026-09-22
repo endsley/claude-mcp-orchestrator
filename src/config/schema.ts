@@ -163,8 +163,13 @@ export const claudeWorkerConfigSchema = z.object({
   maxTurns: z.number().int().min(1).default(300),
   /** Wall-clock cap for a single work session. */
   sessionTimeoutMs: z.number().int().min(60_000).default(7_200_000),
-  /** How long start_work_session waits for the worker to acknowledge. */
-  startAckTimeoutMs: z.number().int().min(500).default(5000),
+  // startAckTimeoutMs used to be declared here, documented as "how long
+  // start_work_session waits for the worker to acknowledge". It had zero read
+  // sites: startSession never waited for an ack at all, so the setting
+  // described behaviour that did not exist. A knob that does nothing is worse
+  // than no knob, because an operator who turns it up believes they have
+  // changed something. Removed rather than wired: adding an ack wait is a
+  // behaviour change, not a documentation fix, and nothing has asked for one.
   /** Keep at most this many progress events per session in the database. */
   maxProgressEvents: z.number().int().min(10).default(500),
   /** One write-capable session per project. Read-only sessions stay concurrent. */
@@ -232,11 +237,25 @@ export const projectsConfigSchema = z.object({
 
 export const memoryConfigSchema = z.object({
   enabled: z.boolean().default(true),
-  /** `mem0-cli` shells out to the existing bridge; `none` disables retrieval. */
+  /**
+   * `none` disables retrieval. `mem0-cli` is a DEPRECATED ALIAS for
+   * `mem0-http`.
+   *
+   * It was documented as shelling out to the Python bridge and was the default,
+   * but no such provider was ever built: app.ts constructs
+   * Mem0HttpMemoryProvider whenever the provider is not `none`. So the default
+   * silently behaved as HTTP -- and, because the baseUrl requirement below only
+   * applied to `mem0-http`, it could do so with no base URL at all, in which
+   * case the provider has nowhere to query and every search quietly returns
+   * nothing -- which load.ts now warns about.
+   *
+   * It REMAINS the default, deliberately. Switching the default to `mem0-http`
+   * is the honest name, but the refine below requires a base URL for that
+   * value, so every config that simply omits a memory block would refuse to
+   * start. Renaming a default is not worth a breaking change; the comment and
+   * the load warning carry the truth instead.
+   */
   provider: z.enum(['mem0-cli', 'mem0-http', 'none']).default('mem0-cli'),
-  /** For `mem0-cli`: interpreter and script path of the existing Mem0 bridge. */
-  pythonPath: z.string().optional(),
-  scriptPath: z.string().optional(),
   /**
    * For `mem0-http`: base URL of the Mem0 service.
    *
@@ -358,6 +377,11 @@ export const appConfigSchema = z
       }
     }
 
+    // Only the EXPLICIT choice of mem0-http is an error without a base URL.
+    // memory.enabled defaults to true, so making this apply to the default
+    // provider as well would refuse to start for every config that omits a
+    // memory block -- a breaking change to punish a silent no-op. The no-op is
+    // reported as a load warning instead; see load.ts.
     if (config.memory.enabled && config.memory.provider === 'mem0-http' && !config.memory.baseUrl) {
       ctx.addIssue({
         code: 'custom',

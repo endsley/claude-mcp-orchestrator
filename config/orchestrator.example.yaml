@@ -84,7 +84,6 @@ claude:
   settingSources: [user, project, local]
   maxTurns: 300
   sessionTimeoutMs: 7200000
-  startAckTimeoutMs: 5000
   maxProgressEvents: 500
   # One write-capable session per project. Read-only sessions stay concurrent.
   enforceProjectWriteLock: true
@@ -110,7 +109,7 @@ memory:
   enabled: true
   # Starts disabled so a freshly copied config validates and starts. Switch to
   # mem0-http once envFile (or MEM0_BASE_URL) is set, then re-run `npm run doctor`.
-  provider: none             # mem0-http | mem0-cli | none
+  provider: none             # mem0-http | none (mem0-cli is a deprecated alias for mem0-http)
   # Point at an existing env file holding MEM0_BASE_URL / MEM0_API_KEY /
   # MEM0_USER_ID. Read only for MEM0_* keys and never logged. Values already
   # exported in the environment win over this file.

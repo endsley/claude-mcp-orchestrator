@@ -74,6 +74,31 @@ describe('loadConfig', () => {
     expect(loaded.config.server.host).toBe('127.0.0.1');
   });
 
+  /**
+   * memory.enabled defaults to true and every provider other than `none` is
+   * HTTP, so a config with no base URL gets a provider with nowhere to query:
+   * every recall returns nothing, and it is indistinguishable from "the user
+   * has no memories". This has to be said out loud, because it cannot be an
+   * error -- refusing to start would break any deployment that simply never
+   * wanted memory.
+   */
+  it('warns that memory will retrieve nothing when no base URL is set', () => {
+    const loaded = loadConfig({ cwd: dir, env: {} });
+    expect(loaded.config.memory.enabled).toBe(true);
+    expect(loaded.config.memory.baseUrl).toBeUndefined();
+    expect(loaded.warnings.join(' ')).toMatch(/memory is enabled but memory\.baseUrl is not set/i);
+  });
+
+  it('warns that the default provider name is a deprecated alias', () => {
+    // `mem0-cli` was documented as shelling out to a Python bridge that was
+    // never built; app.ts constructs the HTTP provider regardless. It stays the
+    // default only because switching to `mem0-http` would trip that provider's
+    // baseUrl requirement for every config that omits a memory block.
+    const loaded = loadConfig({ cwd: dir, env: {} });
+    expect(loaded.config.memory.provider).toBe('mem0-cli');
+    expect(loaded.warnings.join(' ')).toMatch(/deprecated alias/i);
+  });
+
   it('merges built-in context profiles so a fresh install is usable', () => {
     const loaded = loadConfig({ cwd: dir, env: {} });
     expect(Object.keys(loaded.config.contextProfiles)).toEqual(

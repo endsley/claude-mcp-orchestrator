@@ -257,5 +257,20 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
   }
 
   const config = absolutisePaths(mergeBuiltInProfiles(result.data), cwd);
+
+  // Memory is enabled by default and every provider other than `none` is HTTP,
+  // so a config with no base URL gets a provider with nowhere to query: every
+  // search returns nothing, and it looks exactly like "the user has no
+  // memories". Say so out loud rather than failing to start, which would break
+  // any deployment that simply never wanted memory.
+  if (config.memory.enabled && config.memory.provider !== 'none' && !config.memory.baseUrl) {
+    warnings.push(
+      'memory is enabled but memory.baseUrl is not set, so every recall will return nothing; ' +
+        'set memory.baseUrl or set memory.provider to "none"',
+    );
+  }
+  if (config.memory.provider === 'mem0-cli') {
+    warnings.push('memory.provider "mem0-cli" is a deprecated alias for "mem0-http"; no CLI bridge exists');
+  }
   return { config, sourcePath, warnings };
 }
