@@ -75,6 +75,36 @@ const QUANTITY_WORDS = new Set([
   'per',
 ]);
 
+/**
+ * Compound keys that carry METADATA about a credential, not the credential.
+ *
+ * isSensitiveKey works on words, so every one of these contains "token",
+ * "secret" or "authorization" and was redacted unconditionally -- destroying
+ * exactly the fields an operator needs while debugging an OAuth flow.
+ * `token_type: "Bearer"` is a type label. `tokenEndpoint` is a published URL
+ * from a discovery document. `secretName` is the pointer that says WHICH
+ * secret was involved, and erasing it removes the only identifying detail
+ * while protecting nothing.
+ *
+ * Matched on the joined word form, so token_type, tokenType and TOKEN_TYPE are
+ * all the same entry.
+ */
+const CREDENTIAL_METADATA_KEYS = new Set([
+  'tokentype',
+  'tokenendpoint',
+  'tokenurl',
+  'tokenpath',
+  'tokenname',
+  'secretname',
+  'secretarn',
+  'secretid',
+  'secretkeyref',
+  'authorizationendpoint',
+  'authorizationurl',
+  'authorizationstatus',
+  'authorizationcode',
+]);
+
 /** Words that turn a bare "key" into a credential. */
 const KEY_QUALIFIERS = new Set(['api', 'private', 'secret', 'access', 'ssh', 'signing', 'encryption', 'session']);
 
@@ -332,6 +362,9 @@ export function isSensitiveKey(key: string): boolean {
   const words = keyWords(key);
   const joined = words.join('');
 
+  // Metadata about a credential is not a credential.
+  if (CREDENTIAL_METADATA_KEYS.has(joined)) return false;
+
   // Joined forms like apiKey -> ["api","key"], or api_key -> ["api","key"].
   if (SENSITIVE_WORDS.has(joined)) return true;
 
@@ -384,13 +417,33 @@ export function redactValue(value: unknown, depth = 0, seen = new WeakSet<object
     seen.add(value);
 
     if (value instanceof Error) {
-      return {
+      // name/message/stack alone threw away the most useful field a Node error
+      // carries. An ECONNREFUSED is diagnosed by its `code`, not by the words
+      // "connect failed", and `cause` is where fetch and undici put the real
+      // reason. All of them are non-enumerable or otherwise skipped by
+      // JSON.stringify, so dropping them here meant they were simply gone.
+      const out: Record<string, JsonValue> = {
         name: value.name,
         message: redactText(value.message),
         ...(value.stack ? { stack: redactText(value.stack) } : {}),
       };
+      for (const field of ['code', 'errno', 'syscall', 'path', 'port', 'address'] as const) {
+        const detail = (value as unknown as Record<string, unknown>)[field];
+        if (detail !== undefined) out[field] = redactValue(detail, depth + 1, seen);
+      }
+      if (value.cause !== undefined) out['cause'] = redactValue(value.cause, depth + 1, seen);
+      const aggregate = (value as unknown as { errors?: unknown }).errors;
+      if (Array.isArray(aggregate)) out['errors'] = redactValue(aggregate, depth + 1, seen);
+      return out;
     }
-    if (value instanceof Date) return value.toISOString();
+    if (value instanceof Date) {
+      // An invalid Date throws RangeError from toISOString, and this function
+      // is called BY error handlers -- the one place a throw destroys the
+      // failure the caller was trying to report. Recognising a Date and
+      // reading one are, again, two different problems.
+      const time = value.getTime();
+      return Number.isFinite(time) ? value.toISOString() : '[invalid Date]';
+    }
     if (Array.isArray(value)) {
       return value.map((item) => redactValue(item, depth + 1, seen));
     }
@@ -481,9 +534,11 @@ export function redactValue(value: unknown, depth = 0, seen = new WeakSet<object
  * key names but drops every suspicious value, and never echoes a value merely
  * because its name looked innocuous.
  *
- * Nothing in src/ calls this. The doctor it was written for is scripts/doctor.ts,
- * a dev script outside the server process -- which is worth redacting anyway,
- * because doctor output is the thing a human pastes into an issue or a chat.
+ * Nothing calls this -- not src/, and not scripts/doctor.ts either, which
+ * imports only redactText. An earlier version of this comment implied the
+ * doctor used it; it does not. Kept because it is the only correct way to dump
+ * an environment and it is covered by tests, but it is unused code and should
+ * be read as such.
  */
 export function redactEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const out: Record<string, string> = {};

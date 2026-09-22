@@ -618,3 +618,100 @@ describe('redactText leaves ordinary diagnostics exactly alone', () => {
     expect(redactText(line)).toBe(line);
   });
 });
+
+/**
+ * A second independent pass at "what does redaction destroy"
+ * (endsley/bodhi-inbox#36), run blind against the same commit I had just
+ * probed myself. The two passes found LARGELY DISJOINT sets -- I found source
+ * code that only names a secret, it found credential METADATA and two broken
+ * contracts. Complementarity rather than convergence, which is its own
+ * argument for asking twice.
+ */
+describe('metadata about a credential is not a credential', () => {
+  it('keeps the OAuth fields an operator debugs a flow with', () => {
+    // isSensitiveKey works on words, so every one of these contains "token",
+    // "secret" or "authorization" and was redacted unconditionally.
+    const body = '{"access_token":"abc","token_type":"Bearer","expires_in":3600}';
+    const out = redactText(body);
+    expect(out).toContain('"token_type":"Bearer"');
+    expect(out).toContain('"expires_in":3600');
+    // ...while the credential beside them still dies.
+    expect(out).not.toContain('"access_token":"abc"');
+  });
+
+  it('keeps published endpoint URLs, including on both sides of a diff', () => {
+    // A diff with both sides erased tells the reader nothing at all.
+    expect(redactText('{"tokenEndpoint": "https://auth.example.com/token"}')).toBe(
+      '{"tokenEndpoint": "https://auth.example.com/token"}',
+    );
+    const diff = '-  "tokenUrl": "https://old.example/token",';
+    expect(redactText(diff)).toBe(diff);
+  });
+
+  it('keeps the pointer that says WHICH secret was involved', () => {
+    // A Secrets Manager name or ARN identifies the secret without revealing
+    // it; erasing it protects nothing and removes the only useful detail.
+    expect(redactText('secretName=prod/app/db-password')).toBe('secretName=prod/app/db-password');
+    expect(redactText('authorizationStatus: granted')).toBe('authorizationStatus: granted');
+  });
+
+  it('has not gone soft on the keys that hold the real thing', () => {
+    for (const key of ['access_token', 'refresh_token', 'api_key', 'client_secret', 'password']) {
+      expect(isSensitiveKey(key)).toBe(true);
+      expect(redactText(`${key}=abc123def456ghi789`)).not.toContain('abc123def456ghi789');
+    }
+    for (const key of ['tokenType', 'token_type', 'TOKEN_TYPE', 'tokenEndpoint', 'secretName']) {
+      expect(isSensitiveKey(key)).toBe(false);
+    }
+  });
+});
+
+describe('redactValue keeps the contract it documents', () => {
+  it('does not throw on an invalid Date', () => {
+    // toISOString throws RangeError on one, and this function is called BY
+    // error handlers -- the single place where throwing destroys the failure
+    // the caller was trying to report. Recognising a Date and reading one are
+    // two different problems, which is the third time that distinction has
+    // bitten this file.
+    expect(() => redactValue({ when: new Date('nonsense') })).not.toThrow();
+    expect(redactValue({ when: new Date('nonsense') })).toEqual({ when: '[invalid Date]' });
+    // A valid one is still an ISO string.
+    expect(redactValue({ when: new Date(0) })).toEqual({ when: '1970-01-01T00:00:00.000Z' });
+  });
+
+  it('keeps the error fields that actually diagnose a failure', () => {
+    // An ECONNREFUSED is diagnosed by its code, not by the words "connect
+    // failed". These are non-enumerable or otherwise skipped by
+    // JSON.stringify, so dropping them here meant they were simply gone.
+    const error = Object.assign(new Error('connect failed'), {
+      code: 'ECONNREFUSED',
+      errno: -111,
+      syscall: 'connect',
+      port: 443,
+    });
+    expect(redactValue(error)).toMatchObject({
+      name: 'Error',
+      message: 'connect failed',
+      code: 'ECONNREFUSED',
+      errno: -111,
+      syscall: 'connect',
+      port: 443,
+    });
+  });
+
+  it('follows cause, which is where fetch puts the real reason', () => {
+    const outer = new Error('request failed', { cause: Object.assign(new Error('inner'), { code: 'ENOTFOUND' }) });
+    const rendered = redactValue(outer) as Record<string, unknown>;
+    expect(rendered['cause']).toMatchObject({ message: 'inner', code: 'ENOTFOUND' });
+  });
+
+  it('still redacts a secret hiding in a cause or an error field', () => {
+    // Keeping more fields must not mean keeping secrets in them.
+    const secret = `sk-ant-api03-${'B'.repeat(40)}`;
+    const nested = new Error('outer', { cause: new Error(`key ${secret}`) });
+    expect(JSON.stringify(redactValue(nested))).not.toContain(secret);
+
+    const tagged = Object.assign(new Error('failed'), { path: `/home/u/.ssh/id_rsa`, code: secret });
+    expect(JSON.stringify(redactValue(tagged))).not.toContain(secret);
+  });
+});

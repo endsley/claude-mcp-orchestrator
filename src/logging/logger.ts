@@ -101,6 +101,13 @@ class PinoBackedLogger implements Logger {
   ) {}
 
   private emit(level: LogLevel, message: string, context?: LogContext): void {
+    // Ask pino FIRST. Redaction deep-walks every context value and scans the
+    // message, and pino then discards the line entirely if it is below the
+    // configured level -- so at the default level every debug() call paid for a
+    // full redactValue traversal of output nobody would ever see. This is the
+    // hot path: the worker logs progress for every tool call.
+    if (!this.pinoLogger.isLevelEnabled(level)) return;
+
     const merged: Record<string, JsonValue> = {};
     for (const [key, value] of Object.entries({ ...this.bound, ...context })) {
       if (value === undefined) continue;
