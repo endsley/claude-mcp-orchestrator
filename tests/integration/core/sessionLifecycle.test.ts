@@ -436,3 +436,82 @@ describe('status and results', () => {
     expect(manager.getResult(output.sessionId).filesChanged).toEqual(['/tmp/demo/Nav.tsx']);
   });
 });
+
+/**
+ * The duplicate-worker race, from a data-integrity review
+ * (endsley/bodhi-inbox#33).
+ *
+ * `this.workers.get(id) ?? await this.recoverWorker(session)` is check-then-act
+ * across an await, and recoverWorker awaits the project lookup BEFORE it writes
+ * to the map. Two concurrent instructions for a session with no live worker --
+ * the state EVERY session is in after a restart -- both missed the map, both
+ * built a worker, and the second overwrote the first. The first was then never
+ * disposed: a leaked Claude child process with its callbacks still wired, and
+ * the same instruction delivered twice.
+ *
+ * "accepts rapid back-to-back instructions" above cannot catch this: there the
+ * worker already exists, so the map hit short-circuits before any await. The
+ * missing precondition is a session whose worker is GONE.
+ */
+describe('recovering a worker for a restarted session', () => {
+  it('builds one worker for concurrent instructions, not one each', async () => {
+    const output = await manager.startSession({ instruction: 'Fix the nav', project: 'demo' });
+    expect(workers).toHaveLength(1);
+
+    // Exactly what a restart leaves behind: interrupted, no live worker.
+    manager.recoverOnStartup();
+    expect(store.getOrThrow(output.sessionId).status).toBe('interrupted');
+
+    await Promise.all([
+      manager.sendInstruction(output.sessionId, 'one'),
+      manager.sendInstruction(output.sessionId, 'two'),
+      manager.sendInstruction(output.sessionId, 'three'),
+    ]);
+
+    // One recovered worker, not three.
+    expect(workers).toHaveLength(2);
+    // And no orphan: every worker ever built is either live or disposed.
+    const live = workers.filter((worker) => worker.isRunning);
+    expect(live).toHaveLength(1);
+  });
+
+  it('delivers each instruction once, to the one worker', async () => {
+    const output = await manager.startSession({ instruction: 'Start', project: 'demo' });
+    manager.recoverOnStartup();
+
+    await Promise.all([
+      manager.sendInstruction(output.sessionId, 'alpha'),
+      manager.sendInstruction(output.sessionId, 'beta'),
+    ]);
+
+    const recovered = workers[workers.length - 1];
+    expect(recovered?.received).toEqual(expect.arrayContaining(['alpha', 'beta']));
+    // Duplicated work is the user-visible half of this bug: the same
+    // instruction arriving at two workers means it is carried out twice.
+    expect(recovered?.received.filter((line) => line === 'alpha')).toHaveLength(1);
+    expect(recovered?.received.filter((line) => line === 'beta')).toHaveLength(1);
+  });
+
+  it('shares the refusal when a session is past its cap, rather than spawning', async () => {
+    // Both callers must see the same error. If the guard let one through, one
+    // would silently get a worker the reaper is about to kill.
+    const output = await manager.startSession({ instruction: 'Start', project: 'demo' });
+    manager.recoverOnStartup();
+    const before = workers.length;
+
+    // Raw UPDATE, the same way the reaper tests age a session: there is no
+    // store method for this, and inventing one for a test would be the wrong
+    // place to add API.
+    db.prepare('UPDATE work_sessions SET started_at = ? WHERE id = ?').run(
+      new Date(Date.now() - 999 * 60_000).toISOString(),
+      output.sessionId,
+    );
+
+    const results = await Promise.allSettled([
+      manager.sendInstruction(output.sessionId, 'one'),
+      manager.sendInstruction(output.sessionId, 'two'),
+    ]);
+    expect(results.every((result) => result.status === 'rejected')).toBe(true);
+    expect(workers).toHaveLength(before);
+  });
+});

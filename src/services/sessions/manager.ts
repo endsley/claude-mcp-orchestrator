@@ -91,6 +91,10 @@ export class SessionManager {
   private static readonly INTERRUPTED_CONTEXT_WINDOW_MS = 60 * 60 * 1000;
 
   private readonly workers = new Map<string, WorkerLike>();
+
+  /** Recoveries in flight, so concurrent callers share one worker build. */
+
+  private readonly recoveries = new Map<string, Promise<WorkerLike>>();
   private readonly store: WorkSessionStore;
   private readonly broker: PendingRequestBroker;
   private readonly activeContext: ActiveContextStore;
@@ -243,7 +247,7 @@ export class SessionManager {
       );
     }
 
-    const worker = this.workers.get(sessionId) ?? (await this.recoverWorker(session));
+    const worker = await this.workerFor(session);
 
     worker.send(instruction);
     this.store.incrementTurn(sessionId);
@@ -509,6 +513,41 @@ export class SessionManager {
     if (remainingMs <= 0) return undefined;
     if (remainingMs > 10 * 60_000) return undefined;
     return `Only about ${Math.max(1, Math.round(remainingMs / 60_000))} minute(s) remain before this session reaches its wall-clock cap.`;
+  }
+
+  /**
+   * The live worker for a session, rebuilding it at most once.
+   *
+   * This used to be `this.workers.get(id) ?? await this.recoverWorker(session)`,
+   * which is check-then-act across an await. recoverWorker awaits the project
+   * lookup BEFORE it writes to this.workers, so two concurrent instructions for
+   * a session with no live worker -- the state every session is in after a
+   * restart -- both missed the map, both built a worker, and the second
+   * overwrote the first in the map. The first was then never disposed: a leaked
+   * Claude child process with its callbacks still wired up, and the same
+   * instruction delivered to both.
+   *
+   * The existing "rapid back-to-back instructions" test could not catch it,
+   * because there the worker already exists and the map hit short-circuits
+   * before any await.
+   *
+   * Callers share one in-flight recovery instead. The entry is registered in
+   * the same synchronous turn as the call, so a second caller cannot slip in
+   * before it is visible, and a rejection is shared too -- both callers should
+   * see the same SESSION_TIMED_OUT rather than one of them silently spawning.
+   */
+  private async workerFor(session: WorkSession): Promise<WorkerLike> {
+    const live = this.workers.get(session.id);
+    if (live) return live;
+
+    const inFlight = this.recoveries.get(session.id);
+    if (inFlight) return inFlight;
+
+    const recovery = this.recoverWorker(session).finally(() => {
+      this.recoveries.delete(session.id);
+    });
+    this.recoveries.set(session.id, recovery);
+    return recovery;
   }
 
   /** Rebuild a worker for a session whose process is gone, resuming if possible. */
