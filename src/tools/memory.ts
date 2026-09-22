@@ -42,7 +42,7 @@ export function registerMemoryTools(server: McpServer, services: Services): void
         'preferences, past technical decisions, project conventions. Use a specific query; this is ' +
         'not a dump of everything the user has ever said.',
       inputSchema: z.object({
-        query: z.string().min(1).describe('What you need to know, phrased as a search.'),
+        query: z.string().min(1).max(2_000).describe('What you need to know, phrased as a search.'),
         project: z.string().optional().describe('Bias results toward a project.'),
         limit: z.number().int().min(1).max(20).optional(),
       }),

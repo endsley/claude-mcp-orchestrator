@@ -45,7 +45,7 @@ export function registerProjectTools(server: McpServer, services: Services): voi
         'Resolve a spoken project name or alias ("my transit app", "home tab") to a specific project. ' +
         'Returns candidates rather than guessing when ambiguous. Never invent a project.',
       inputSchema: z.object({
-        query: z.string().min(1).describe('The name or description the user used.'),
+        query: z.string().min(1).max(512).describe('The name or description the user used.'),
         computer: z.string().optional().describe('Restrict to a specific computer id.'),
       }),
     },
@@ -82,7 +82,7 @@ export function registerProjectTools(server: McpServer, services: Services): voi
         'Detail for one project: language, git branch and cleanliness, whether it has a CLAUDE.md, ' +
         'and any work session currently running against it.',
       inputSchema: z.object({
-        project: z.string().min(1).describe('Project id, path, name or alias.'),
+        project: z.string().min(1).max(512).describe('Project id, path, name or alias.'),
       }),
     },
     guarded('get_project_context', logger, async (args) => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ProjectMatcher, contentTokens, projectLabels } from '../../../src/services/projects/matching.js';
+import { normalizeLookup } from '../../../src/context/text.js';
 import type { Project } from '../../../src/types/projects.js';
 
 function project(partial: Partial<Project> & { name: string }): Project {
@@ -151,6 +152,28 @@ describe('ProjectMatcher', () => {
   it('keeps the project id matchable', () => {
     const clinic = corpus.find((candidate) => candidate.name === 'lotus-clinic')!;
     expect(projectLabels(clinic).map((label) => label.text)).toContain(clinic.id);
+  });
+
+  /**
+   * similarity() is whole-string Levenshtein run once per label per project,
+   * so query length used to translate almost linearly into blocking CPU:
+   * measured on the real 28-project corpus, ~27ms per KB, which put a 256KB
+   * body (the server limit) at roughly seven seconds of event loop.
+   *
+   * Asserted on the normalised length rather than elapsed time, because a
+   * stopwatch cannot tell a bounded input from a fast machine.
+   */
+  it('refuses to consider an unbounded query length', () => {
+    const huge = 'mcp server '.repeat(30_000); // ~330KB
+    expect(huge.length).toBeGreaterThan(256 * 1024);
+    expect(normalizeLookup(huge).length).toBeLessThanOrEqual(512);
+  });
+
+  it('leaves any realistic query completely untouched', () => {
+    const realistic = 'the mcp server I wrote for claude';
+    // normalizeLookup lowercases by design; what matters is that nothing is cut.
+    expect(normalizeLookup(realistic)).toBe(realistic.toLowerCase());
+    expect(normalizeLookup(realistic)).toHaveLength(realistic.length);
   });
 
   it('bounds the work an oversized query can force', () => {

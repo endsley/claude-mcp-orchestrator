@@ -55,7 +55,7 @@ export function registerComputerTools(server: McpServer, services: Services): vo
         'Resolve a spoken machine name or alias ("the GPU machine", "my web server", "the 24 gig box") ' +
         'to a specific computer. Returns candidates instead of guessing when the phrase is ambiguous.',
       inputSchema: z.object({
-        query: z.string().min(1).describe('The name, alias, role or description the user used.'),
+        query: z.string().min(1).max(512).describe('The name, alias, role or description the user used.'),
       }),
     },
     guarded('get_computer', logger, async (args) => {
