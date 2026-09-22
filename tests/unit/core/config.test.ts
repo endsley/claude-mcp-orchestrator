@@ -223,3 +223,63 @@ describe('isLoopbackHost boundary', () => {
     ).not.toThrow();
   });
 });
+
+/**
+ * The refresh grace window and the request timeout are related, and nothing
+ * checked the relationship.
+ *
+ * The grace exists so a client that retried after losing the response is not
+ * mistaken for an attacker replaying a stolen token. Set it below the time a
+ * client waits before retrying and the protection inverts: the ordinary retry
+ * lands outside the window, is classified as theft, and revokes the whole
+ * rotation chain -- the user is pushed through re-consent for doing nothing
+ * wrong, and the verdict exists only in the server log.
+ *
+ * The schema comment already said "two times the client timeout is a
+ * reasonable rule". A documented relationship with nothing verifying it is the
+ * same class of problem as a documented setting with no caller
+ * (endsley/bodhi-inbox#37).
+ */
+describe('refresh grace against request timeout', () => {
+  function loadWith(lines: string[]): ReturnType<typeof loadConfig> {
+    writeFileSync(join(dir, 'orchestrator.yaml'), lines.join('\n'));
+    return loadConfig({ cwd: dir, env: {} });
+  }
+
+  it('warns when the grace is shorter than a client retry', () => {
+    const loaded = loadWith([
+      'server:',
+      '  host: 127.0.0.1',
+      '  requestTimeoutMs: 30000',
+      '  auth:',
+      '    mode: none',
+      '    refreshReplayGraceMs: 5000',
+      '',
+    ]);
+    expect(loaded.warnings.join(' ')).toMatch(/refreshReplayGraceMs/);
+    expect(loaded.warnings.join(' ')).toMatch(/stolen-token replay|whole chain/i);
+  });
+
+  it('says nothing at the documented two-to-one default', () => {
+    // 60s grace against a 30s timeout: the shipped defaults, and they must not
+    // produce a warning or the warning becomes noise.
+    const loaded = loadWith(['server:', '  host: 127.0.0.1', '  auth:', '    mode: none', '']);
+    expect(loaded.config.server.auth.refreshReplayGraceMs).toBe(60_000);
+    expect(loaded.config.server.requestTimeoutMs).toBe(30_000);
+    expect(loaded.warnings.join(' ')).not.toMatch(/refreshReplayGraceMs/);
+  });
+
+  it('warns when the timeout is raised past a default grace', () => {
+    // The same inversion reached from the other side, which is the easier one
+    // to do by accident.
+    const loaded = loadWith([
+      'server:',
+      '  host: 127.0.0.1',
+      '  requestTimeoutMs: 120000',
+      '  auth:',
+      '    mode: none',
+      '',
+    ]);
+    expect(loaded.warnings.join(' ')).toMatch(/refreshReplayGraceMs/);
+  });
+});

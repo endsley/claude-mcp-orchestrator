@@ -269,6 +269,23 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
         'set memory.baseUrl or set memory.provider to "none"',
     );
   }
+  // The refresh grace exists so that a client which retried after losing the
+  // response is not mistaken for an attacker replaying a stolen token. If it is
+  // shorter than the time a client waits before retrying, that protection is
+  // inverted: an ordinary retry arrives outside the window, is classified as
+  // theft, and revokes the entire rotation chain -- forcing the user through
+  // re-consent for doing nothing wrong. The schema comment already says "two
+  // times the client timeout is a reasonable rule"; nothing checked it, which
+  // is the same gap as a documented setting with no caller.
+  if (config.server.auth.refreshReplayGraceMs < config.server.requestTimeoutMs) {
+    warnings.push(
+      `server.auth.refreshReplayGraceMs (${config.server.auth.refreshReplayGraceMs}ms) is below ` +
+        `server.requestTimeoutMs (${config.server.requestTimeoutMs}ms), so a client that retries after a ` +
+        'lost response will be treated as a stolen-token replay and have its whole chain revoked; ' +
+        'roughly twice the request timeout is the intended relationship',
+    );
+  }
+
   if (config.memory.provider === 'mem0-cli') {
     warnings.push('memory.provider "mem0-cli" is a deprecated alias for "mem0-http"; no CLI bridge exists');
   }
