@@ -269,8 +269,10 @@ describe('redactText round two', () => {
     // Basic is a password in base64. Pinning the scheme to "bearer" made the
     // optional group fail, the 12-char body then had to match "Basic" itself,
     // and the whole pattern missed.
-    expect(redactText('Authorization: Basic dXNlcjpwYXNzd29yZA==')).toBe('Authorization: [redacted]');
-    expect(redactText(`Proxy-Authorization: Bearer ${'k'.repeat(40)}`)).toBe('Proxy-Authorization: [redacted]');
+    // The SCHEME survives -- which scheme was used is diagnostics, and keeping
+    // the harmless prefix is what this pattern does everywhere else.
+    expect(redactText('Authorization: Basic dXNlcjpwYXNzd29yZA==')).toBe('Authorization: Basic [redacted]');
+    expect(redactText(`Proxy-Authorization: Bearer ${'k'.repeat(40)}`)).toBe('Proxy-Authorization: Bearer [redacted]');
     expect(redactText(`authorization: Token ${'k'.repeat(40)}`)).toContain('[redacted]');
   });
 
@@ -309,6 +311,7 @@ describe('redactText round two', () => {
     // the assignment pattern as key "Proxy-Authorization" with value
     // "[redacted" -- re-emitting the placeholder and dropping its bracket.
     expect(redactText(`Proxy-Authorization: Bearer ${'k'.repeat(40)}`)).not.toContain('[redacted]]');
+    expect(redactText(`authorization: Bearer ${'k'.repeat(40)}`)).toBe('authorization: Bearer [redacted]');
   });
 
   it('leaves an ordinary structured log line completely alone', () => {
@@ -378,7 +381,7 @@ describe('a harmless assignment never swallows a secret', () => {
   });
 
   it('redacts an auth scheme whose name contains a digit', () => {
-    expect(redactText('Authorization: OAuth2 a1b2c3d4e5f6g7h8')).toBe('Authorization: [redacted]');
+    expect(redactText('Authorization: OAuth2 a1b2c3d4e5f6g7h8')).toBe('Authorization: OAuth2 [redacted]');
   });
 
   it('terminates on input that is nothing but separators', () => {
@@ -446,5 +449,78 @@ describe('redactValue survives hostile objects without throwing', () => {
     };
     expect(() => JSON.stringify(redactValue(hostile))).not.toThrow();
     expect(JSON.stringify(redactValue(hostile))).not.toContain(secret);
+  });
+});
+
+/**
+ * Round four, from a second reviewer on the same commit. It converged with the
+ * first on the auth-header over-reach and the Proxy hole -- two reviewers that
+ * cannot see each other landing on one spot is the strongest signal available
+ * -- and found two things neither the first reviewer nor my own probes caught.
+ */
+describe('quoted values are redacted whole', () => {
+  it('does not leave the tail of a quoted passphrase behind', () => {
+    // The manual scan dropped the quoted alternative the original pattern had,
+    // so the value ran only to the next space and three words of a four-word
+    // passphrase survived. A regression introduced by the previous commit.
+    expect(redactText('password="correct horse battery staple"')).toBe('password="[redacted]"');
+    expect(redactText("passphrase='my long secret phrase'")).toBe("passphrase='[redacted]'");
+  });
+
+  it('keeps the quotes so the surrounding structure still parses', () => {
+    expect(redactText('{"api_key": "abc 123 def"}')).toContain('"api_key": "[redacted]"');
+  });
+
+  it('still stops at whitespace when the value is unquoted', () => {
+    // Unquoted, there is no way to know where the value ends, so the rest of
+    // the line must survive.
+    expect(redactText('api_key=abc123def456 request completed')).toBe('api_key=[redacted] request completed');
+  });
+});
+
+describe('a bare credential noun is judged by its value', () => {
+  it('redacts token=<unshaped secret>', () => {
+    // The module's own comment claimed unshaped secrets were caught by their
+    // key, while assignmentIsSecret deliberately excluded a bare lowercase
+    // "token" to protect prose. Both cannot be true.
+    const hex = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0';
+    expect(redactText(`token=${hex}`)).toBe('token=[redacted]');
+    expect(redactText(`signature=${hex}`)).toBe('signature=[redacted]');
+  });
+
+  it('still leaves the prose form alone', () => {
+    expect(redactText('token: expired')).toBe('token: expired');
+    expect(redactText('signature: v2')).toBe('signature: v2');
+    expect(redactText('token: not-yet-issued')).toBe('token: not-yet-issued');
+  });
+});
+
+describe('the authorization header is told apart from prose about it', () => {
+  it('leaves a status message after authorization: alone', () => {
+    // All three ate the whole value before: a 12+ character word after the
+    // colon was assumed to be a credential.
+    expect(redactText('authorization: mode=api-key')).toBe('authorization: mode=api-key');
+    expect(redactText('authorization: successful-login-completed')).toBe('authorization: successful-login-completed');
+    expect(redactText('{"authorization":"pending-approval"}')).toBe('{"authorization":"pending-approval"}');
+  });
+
+  it('but redacts unconditionally once a scheme is present', () => {
+    // A scheme is the evidence. "Scheme token" is a credential whatever the
+    // token looks like, so no shape test is applied there.
+    expect(redactText('authorization: Bearer pending-approval-x')).toBe('authorization: Bearer [redacted]');
+  });
+
+  it('redacts a schemeless value that does look like a credential', () => {
+    expect(redactText('authorization: aB3dE5fG7hJ9kL1m')).toBe('authorization: [redacted]');
+  });
+});
+
+describe('enumerating an object is as fallible as reading it', () => {
+  it('does not throw when Object.keys itself is trapped', () => {
+    // The getter guard added last commit covered the READ. Object.keys can
+    // throw too, on a Proxy with an ownKeys trap.
+    const hostile = new Proxy({}, { ownKeys() { throw new Error('nope'); } });
+    expect(() => redactValue({ h: hostile })).not.toThrow();
+    expect(String((redactValue({ h: hostile }) as Record<string, unknown>)['h'])).toContain('unreadable');
   });
 });

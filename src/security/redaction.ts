@@ -125,13 +125,22 @@ const VALUE_PATTERNS: Array<{ name: string; re: RegExp }> = [
   // the whole pattern missed -- leaking the credential in full. The scheme
   // allows digits because OAuth2 is a real one.
   //
-  // Known and ACCEPTED over-reach: "authorization: Server authentication
-  // failed" becomes "authorization: [redacted] failed", because a long word is
-  // indistinguishable from an opaque token. Every rule that would tell them
-  // apart -- requiring a digit, requiring punctuation, requiring 24+ characters
-  // -- also misses a real credential (a 20-character Basic blob, a pure-alpha
-  // token). This layer errs toward losing a diagnostic rather than leaking.
-  { name: 'auth-header', re: /\b((?:proxy-)?authorization["']?\s*[:=]\s*["']?)(?:[A-Za-z][A-Za-z0-9-]*\s+)?[A-Za-z0-9._~+/=-]{12,}/gi },
+  // The scheme is captured separately because its PRESENCE is the evidence.
+  // "Authorization: <scheme> <token>" is a credential whatever the token looks
+  // like, so the token is redacted unconditionally there. With no scheme,
+  // anything after the colon is as likely to be prose, and a previous version
+  // of this pattern ate "authorization: mode=api-key",
+  // "authorization: successful-login-completed" and
+  // {"authorization":"pending-approval"} -- so the no-scheme case has to look
+  // credential-shaped. See looksLikeCredential.
+  //
+  // Still accepted over-reach: "authorization: Server authentication failed"
+  // redacts, because "Server" parses as a scheme and "Scheme word" is genuinely
+  // ambiguous. Safety wins where a scheme is present.
+  {
+    name: 'auth-header',
+    re: /\b((?:proxy-)?authorization["']?\s*[:=]\s*["']?)((?:[A-Za-z][A-Za-z0-9-]*\s+)?)([A-Za-z0-9._~+/=-]{12,})/gi,
+  },
 ];
 
 /**
@@ -163,20 +172,49 @@ const STANDALONE_SECRET_WORDS = new Set(['password', 'passwd', 'passphrase', 'se
  * separator, so a nested assignment is still examined. lastIndex strictly
  * increases (the key is at least one character), so the loop always terminates.
  */
+/**
+ * Whether the text at `from`, after any whitespace, is a redaction placeholder.
+ *
+ * Written as an index scan rather than `input.slice(from)` against a regex,
+ * because the slice runs once PER MATCH and a log line is mostly matches. That
+ * measured superlinearly at 256KB (the MCP body limit) -- the same shape as the
+ * unbounded-input mistake this repo has already paid for once.
+ */
+function placeholderFollows(text: string, from: number): boolean {
+  let index = from;
+  while (index < text.length) {
+    const char = text[index];
+    if (char !== ' ' && char !== '\t' && char !== '\n' && char !== '\r') break;
+    index += 1;
+  }
+  return text.startsWith(REDACTED, index);
+}
+
 function redactAssignments(input: string): string {
-  const re = /\b([A-Za-z][A-Za-z0-9_.-]*)(["']?\s*[:=]\s*["']?)([^\s,;}\]"'?&#]+)/g;
+  // The value alternation takes a QUOTED run first. Matching only to the next
+  // whitespace leaked the tail of every quoted passphrase:
+  // password="correct horse battery staple" kept three of its four words.
+  const re = /\b([A-Za-z][A-Za-z0-9_.-]*)(["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}\]"'?&#]+)/g;
   let out = '';
   let cursor = 0;
   let match: RegExpExecArray | null = re.exec(input);
   while (match !== null) {
-    const [whole, key, sep, value] = match as unknown as [string, string, string, string];
-    // An earlier pattern may already have scrubbed this value; re-matching it
-    // re-emits the placeholder and strips its closing bracket.
-    if (!value.startsWith('[redacted') && assignmentIsSecret(key)) {
-      out += input.slice(cursor, match.index) + key + sep + REDACTED;
+    const [whole, key, sep, raw] = match as unknown as [string, string, string, string];
+    const quote = raw.startsWith('"') ? '"' : raw.startsWith("'") ? "'" : '';
+    const value = quote === '' ? raw : raw.slice(1, -1);
+    // An earlier, more specific pattern may already have handled this text --
+    // either the value IS the placeholder, or the placeholder sits just after
+    // it, as in "authorization: Bearer [redacted]" where the scheme is
+    // deliberately kept. Redacting again would eat the part worth keeping.
+    const handled =
+      value.startsWith('[redacted') || placeholderFollows(input, match.index + whole.length);
+    if (!handled && assignmentIsSecret(key, value)) {
+      out += input.slice(cursor, match.index) + key + sep + quote + REDACTED + quote;
       cursor = match.index + whole.length;
       re.lastIndex = cursor;
     } else {
+      // Rewind past the separator only, never past the value: a harmless pair
+      // that consumes its value can swallow a nested secret.
       re.lastIndex = match.index + key.length + sep.length;
     }
     match = re.exec(input);
@@ -184,13 +222,35 @@ function redactAssignments(input: string): string {
   return out + input.slice(cursor);
 }
 
+/**
+ * Whether a string is shaped like an opaque credential rather than prose.
+ *
+ * Every real encoding of a secret -- base64, base64url, hex, a vendor id --
+ * mixes case, digits or punctuation. English does not. This is only ever used
+ * to break a tie where the surrounding syntax is ambiguous; a value with a
+ * known prefix or a sensitive compound key never needs it.
+ */
+function looksLikeCredential(value: string): boolean {
+  // "successful-login-completed", "pending-approval", "expired".
+  if (/^[a-z-]+$/.test(value)) return false;
+  // "=" is base64 padding and belongs at the END. In the middle it is a nested
+  // assignment such as "mode=api-key".
+  if (/=[^=]/.test(value)) return false;
+  return true;
+}
+
 /** Whether `key = value` in free text should have its value scrubbed. */
-function assignmentIsSecret(key: string): boolean {
+function assignmentIsSecret(key: string, value: string): boolean {
   if (!isSensitiveKey(key)) return false;
   const words = keyWords(key);
   if (words.length > 1) return true;
   if (key === key.toUpperCase() && /[A-Z]/.test(key)) return true;
-  return STANDALONE_SECRET_WORDS.has(words[0] ?? '');
+  if (STANDALONE_SECRET_WORDS.has(words[0] ?? '')) return true;
+  // A bare lowercase "token"/"bearer"/"signature" is usually a log label, which
+  // is why it is excluded above -- but "token=<40 hex chars>" is a secret, and
+  // the module's own comment claimed unshaped secrets were caught by their key.
+  // Break the tie on the value: prose is short and alphabetic.
+  return value.length >= 16 && looksLikeCredential(value) && !/^[A-Za-z]+$/.test(value);
 }
 
 /**
@@ -213,7 +273,12 @@ export function redactText(input: string): string {
     // Patterns with capture groups keep the harmless prefix so the log still
     // says WHICH setting was scrubbed.
     if (name === 'auth-header') {
-      out = out.replace(re, (_m, prefix: string) => `${prefix}${REDACTED}`);
+      out = out.replace(re, (whole: string, prefix: string, scheme: string, token: string) => {
+        // A scheme means a credential whatever the token looks like. Without
+        // one, the text after the colon has to look like a credential.
+        if (scheme !== '' || looksLikeCredential(token)) return `${prefix}${scheme}${REDACTED}`;
+        return whole;
+      });
     } else if (name === 'url-credentials') {
       out = out.replace(re, (_m, prefix: string) => `${prefix}:${REDACTED}@`);
     } else {
@@ -346,7 +411,15 @@ export function redactValue(value: unknown, depth = 0, seen = new WeakSet<object
     // redaction down -- and this function is called by error handlers, where
     // throwing again loses the failure the caller was trying to report.
     const out: Record<string, JsonValue> = {};
-    for (const key of Object.keys(value as Record<string, unknown>)) {
+    // Object.keys can itself throw: a Proxy may trap ownKeys. Enumerating and
+    // reading are two more places the same lesson applies.
+    let keys: string[];
+    try {
+      keys = Object.keys(value as Record<string, unknown>);
+    } catch {
+      return `[unreadable ${(value as { constructor?: { name?: string } }).constructor?.name || 'object'}]`;
+    }
+    for (const key of keys) {
       if (isSensitiveKey(key)) {
         out[key] = REDACTED;
         continue;
