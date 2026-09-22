@@ -564,6 +564,23 @@ export class SessionManager {
       );
     }
     const project = session.projectId ? await this.safeGetProject(session.projectId) : undefined;
+
+    // Re-read AFTER the await. cancel() looks for a live worker in this.workers
+    // to interrupt and dispose, and during a recovery there is not one yet --
+    // so a cancel arriving here finds nothing to stop, marks the session
+    // terminal, and returns. Building and starting a worker afterwards spawns a
+    // Claude child process for a session nobody is waiting on, burns tokens on
+    // the reconstruction prompt, and leaves the worker in the map until
+    // shutdown. cancel() already re-reads for the same reason on its own side.
+    const current = this.store.get(session.id);
+    if (current === undefined || isTerminalStatus(current.status)) {
+      throw orchestratorError(
+        'SESSION_ALREADY_FINISHED',
+        `work session ${session.id} finished while its worker was being rebuilt`,
+        { details: { sessionId: session.id, status: current?.status ?? 'deleted' } },
+      );
+    }
+
     const cwd = project?.path ?? process.cwd();
     const worker = this.buildWorker(session.id, cwd);
     this.workers.set(session.id, worker);

@@ -515,3 +515,60 @@ describe('recovering a worker for a restarted session', () => {
     expect(workers).toHaveLength(before);
   });
 });
+
+/**
+ * Cancel arriving while a worker is being rebuilt.
+ *
+ * cancel() looks for a live worker in this.workers to interrupt and dispose,
+ * and during a recovery there is not one yet -- recoverWorker awaits the
+ * project lookup before it writes to the map. So a cancel in that window finds
+ * nothing to stop, marks the session terminal, and returns; the recovery then
+ * finishes and starts a Claude child process for a session nobody is waiting
+ * on, burning tokens on the reconstruction prompt and leaving the worker in
+ * the map until shutdown.
+ *
+ * The interleaving is forced through projects.get, which is the await that
+ * opens the window. That is deliberate: a timing-based attempt at this race
+ * would be a flake, and the window is defined by that await, not by luck.
+ */
+describe('cancelling a session while its worker is being rebuilt', () => {
+  it('does not start a worker for a session that was cancelled mid-recovery', async () => {
+    const output = await manager.startSession({ instruction: 'Fix the nav', project: 'demo' });
+    expect(workers).toHaveLength(1);
+
+    // Exactly what a restart leaves behind: interrupted, no live worker.
+    manager.recoverOnStartup();
+    const builtBefore = workers.length;
+
+    // Cancel lands DURING the project lookup inside recoverWorker.
+    const getSpy = vi.spyOn(projects, 'get').mockImplementation(async () => {
+      await manager.cancel(output.sessionId, 'user pressed stop');
+      return PROJECT;
+    });
+
+    try {
+      await expect(manager.sendInstruction(output.sessionId, 'carry on')).rejects.toMatchObject({
+        code: 'SESSION_ALREADY_FINISHED',
+      });
+    } finally {
+      getSpy.mockRestore();
+    }
+
+    // The whole point: no Claude process for a cancelled session.
+    expect(workers).toHaveLength(builtBefore);
+    expect(store.getOrThrow(output.sessionId).status).toBe('cancelled');
+  });
+
+  it('still rebuilds normally when no cancel arrives', async () => {
+    // The guard must not cost the ordinary recovery path.
+    const output = await manager.startSession({ instruction: 'Start', project: 'demo' });
+    manager.recoverOnStartup();
+    const before = workers.length;
+
+    await manager.sendInstruction(output.sessionId, 'carry on');
+
+    expect(workers).toHaveLength(before + 1);
+    expect(workers[workers.length - 1]?.received).toContain('carry on');
+    expect(store.getOrThrow(output.sessionId).status).toBe('working');
+  });
+});
