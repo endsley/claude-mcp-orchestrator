@@ -221,6 +221,14 @@ describe('work session tools', () => {
 describe('responsiveness', () => {
   // The voice front end makes these calls on nearly every turn, so their
   // latency is a user-facing feature rather than an implementation detail.
+  /**
+   * A latency smoke check, NOT proof that the capability cache works. It
+   * passed for the whole period the cache was per-request and re-probed every
+   * call, because the providers configured in this test are cheap enough to
+   * come in under the bound either way. The cache itself is covered by probe
+   * COUNTING in tests/unit/context/capability-cache.test.ts; keep the real
+   * guarantee there rather than on a stopwatch.
+   */
   it('answers list_context_capabilities fast on repeat calls', async () => {
     await rpc('tools/call', { name: 'list_context_capabilities', arguments: {} }, 20);
     const started = Date.now();

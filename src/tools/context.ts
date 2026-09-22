@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Services } from '../server/container.js';
 import type { JsonValue } from '../types/json.js';
 import { guarded, toolResult } from './result.js';
+import { cachedCapabilities } from './capability-cache.js';
 
 /**
  * Capability listings are cached briefly.
@@ -20,26 +21,11 @@ const CAPABILITY_CACHE_TTL_MS = 5_000;
 export function registerContextTools(server: McpServer, services: Services): void {
   const { logger, contextAssembler, activeContext } = services;
 
-  let capabilityCache: { at: number; value: Awaited<ReturnType<typeof contextAssembler.capabilities>> } | undefined;
-  let capabilityInFlight: Promise<Awaited<ReturnType<typeof contextAssembler.capabilities>>> | undefined;
-
-  const getCapabilities = async (): Promise<Awaited<ReturnType<typeof contextAssembler.capabilities>>> => {
-    const now = Date.now();
-    if (capabilityCache && now - capabilityCache.at < CAPABILITY_CACHE_TTL_MS) return capabilityCache.value;
-    // Collapse concurrent callers onto one probe run, so three rapid voice
-    // turns do not trigger three rounds of health checks.
-    if (capabilityInFlight) return capabilityInFlight;
-    capabilityInFlight = contextAssembler
-      .capabilities()
-      .then((value) => {
-        capabilityCache = { at: Date.now(), value };
-        return value;
-      })
-      .finally(() => {
-        capabilityInFlight = undefined;
-      });
-    return capabilityInFlight;
-  };
+  // Deliberately NOT a closure local: this function runs once per request, so
+  // a local cache would be new every time and the TTL would never survive a
+  // request. See ./capability-cache.ts.
+  const getCapabilities = async (): Promise<Awaited<ReturnType<typeof contextAssembler.capabilities>>> =>
+    cachedCapabilities(contextAssembler, CAPABILITY_CACHE_TTL_MS);
 
   server.registerTool(
     'get_environment_context',
