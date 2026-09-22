@@ -352,3 +352,99 @@ describe('redactValue handles objects that are not plain objects', () => {
     expect(out['s']).toEqual(['plain', '[redacted]']);
   });
 });
+
+/**
+ * Round three, from the review panel on the round-two commit. Codex found five
+ * things; three were defects in code written an hour earlier, and every one was
+ * reproduced before being fixed. The theme is that a redactor has two separate
+ * jobs -- recognising a hostile value and reading it -- and getting the first
+ * right does not give you the second.
+ */
+describe('a harmless assignment never swallows a secret', () => {
+  const secret = 'q'.repeat(40);
+
+  it('finds a secret nested inside a harmless value', () => {
+    // A global regex CONSUMES its match. "payload={access_token=…}" matched key
+    // "payload", value "{access_token=…", found it harmless, and ate the secret.
+    expect(redactText(`payload={access_token=${secret}}`)).toBe('payload={access_token=[redacted]}');
+    expect(redactText(`a={b={api_key=${secret}}}`)).toBe('a={b={api_key=[redacted]}}');
+  });
+
+  it('handles a dotted key', () => {
+    // isSensitiveKey splits on "." and called this sensitive; the key pattern
+    // did not allow "." so the pair was never offered to it.
+    expect(isSensitiveKey('access.token')).toBe(true);
+    expect(redactText(`access.token=${secret}`)).toBe('access.token=[redacted]');
+  });
+
+  it('redacts an auth scheme whose name contains a digit', () => {
+    expect(redactText('Authorization: OAuth2 a1b2c3d4e5f6g7h8')).toBe('Authorization: [redacted]');
+  });
+
+  it('terminates on input that is nothing but separators', () => {
+    // The scan rewinds its cursor on a harmless pair, so termination depends on
+    // lastIndex strictly increasing rather than on the match being consumed.
+    expect(redactText('a=b=c=d=e')).toBe('a=b=c=d=e');
+    expect(redactText('::::')).toBe('::::');
+    expect(redactText('a:'.repeat(500))).toBe('a:'.repeat(500));
+  });
+});
+
+describe('redactValue survives hostile objects without throwing', () => {
+  const secret = 'sk-ant-api03-SUPERSECRETVALUE';
+
+  it('does not byte-dump a Proxy-wrapped Buffer', () => {
+    // ArrayBuffer.isView tests an internal slot a Proxy does not have, so the
+    // first version of the binary guard missed this and dumped the bytes.
+    // instanceof walks the prototype chain, which a Proxy forwards.
+    const out = redactValue({ b: new Proxy(Buffer.from(secret), {}) }) as Record<string, unknown>;
+    const serialised = JSON.stringify(out);
+    expect(serialised).not.toContain('115');
+    expect(serialised).not.toContain(secret);
+    expect(String(out['b'])).toContain('Buffer');
+  });
+
+  it('covers typed-array subclasses', () => {
+    const out = redactValue({ b: new (class extends Uint8Array {})(3) }) as Record<string, unknown>;
+    expect(String(out['b'])).toBe('[TypedArray 3 bytes]');
+  });
+
+  it('redacts a secret used as a Map KEY', () => {
+    // new Map([[token, 'ok']]) emitted the token as a property name.
+    const out = redactValue({ m: new Map([[`sk-ant-api03-${'z'.repeat(30)}`, 'ok']]) }) as Record<string, unknown>;
+    expect(JSON.stringify(out)).not.toContain('zzzz');
+    expect(out['m']).toEqual({ '[redacted]': 'ok' });
+  });
+
+  it('degrades rather than throwing on a collection it cannot read', () => {
+    // A proxied Map passes instanceof and then throws TypeError from
+    // .entries(). This runs on error paths, where throwing again destroys the
+    // original failure -- the thing the caller actually wanted to log.
+    expect(() => redactValue({ m: new Proxy(new Map([['a', 1]]), {}) })).not.toThrow();
+    const out = redactValue({ m: new Proxy(new Map([['a', 1]]), {}) }) as Record<string, unknown>;
+    expect(out['m']).toBe('[unreadable Map]');
+  });
+
+  it('never throws on any of the awkward shapes at once', () => {
+    // The contract that matters: this function is called BY error handlers.
+    const cycle: Record<string, unknown> = {};
+    cycle['self'] = cycle;
+    const hostile = {
+      proxiedBuffer: new Proxy(Buffer.from(secret), {}),
+      proxiedMap: new Proxy(new Map([['k', 'v']]), {}),
+      proxiedSet: new Proxy(new Set([1]), {}),
+      getter: Object.defineProperty({}, 'boom', { get() { throw new Error('nope'); }, enumerable: true }),
+      cycle,
+      deep: new Array(20).fill(0).reduce<unknown>((acc) => ({ acc }), 'leaf'),
+      big: 10n,
+      sym: Symbol('s'),
+      fn: () => undefined,
+      nan: Number.NaN,
+      date: new Date(0),
+      nul: null,
+      undef: undefined,
+    };
+    expect(() => JSON.stringify(redactValue(hostile))).not.toThrow();
+    expect(JSON.stringify(redactValue(hostile))).not.toContain(secret);
+  });
+});

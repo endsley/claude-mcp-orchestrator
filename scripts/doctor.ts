@@ -5,6 +5,12 @@
  * Every check answers one question: would the server work right now, and if
  * not, what does the operator have to change? Output never contains secrets —
  * only whether a secret is present, never its value.
+ *
+ * That last sentence used to be an assertion with nothing behind it. `detail`
+ * is free text assembled from exception messages and subprocess output, so it
+ * is exactly as trustworthy as whatever threw. Every line now leaves through
+ * redactText, which is worth more here than in the server: doctor output is
+ * what a human pastes into an issue or a chat window.
  */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -12,6 +18,7 @@ import { promisify } from 'node:util';
 import { buildApplication } from '../src/app.js';
 import { createNullLogger } from '../src/logging/logger.js';
 import { OrchestratorError } from '../src/types/errors.js';
+import { redactText } from '../src/security/redaction.js';
 
 const run = promisify(execFile);
 
@@ -167,7 +174,7 @@ async function main(): Promise<void> {
 function report(): void {
   const pad = Math.max(...checks.map((c) => c.name.length), 10);
   for (const check of checks) {
-    console.log(`${check.level.padEnd(7)} ${check.name.padEnd(pad)}  ${check.detail}`);
+    console.log(`${check.level.padEnd(7)} ${check.name.padEnd(pad)}  ${redactText(check.detail)}`);
   }
   const errors = checks.filter((c) => c.level === 'ERROR').length;
   const warnings = checks.filter((c) => c.level === 'WARNING').length;
@@ -175,6 +182,6 @@ function report(): void {
 }
 
 main().catch((error: unknown) => {
-  console.error('doctor failed:', error instanceof Error ? error.message : String(error));
+  console.error('doctor failed:', redactText(error instanceof Error ? error.stack ?? error.message : String(error)));
   process.exitCode = 2;
 });

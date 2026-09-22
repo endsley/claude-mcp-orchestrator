@@ -122,23 +122,16 @@ const VALUE_PATTERNS: Array<{ name: string; re: RegExp }> = [
   // Any auth scheme, not just Bearer. `Basic <base64(user:password)>` is a
   // password in light disguise, and pinning the scheme to "bearer" meant the
   // optional group failed, the {12,} body then had to match "Basic" itself, and
-  // the whole pattern missed -- leaking the credential in full.
-  { name: 'auth-header', re: /\b((?:proxy-)?authorization["']?\s*[:=]\s*["']?)(?:[A-Za-z]+\s+)?[A-Za-z0-9._~+/=-]{12,}/gi },
-  // KEY=value / "key": "value" for ANY key, with isSensitiveKey() -- not this
-  // regex -- deciding whether the value is a secret. The alternation this
-  // replaces was a third copy of the policy and had already drifted from the
-  // other two: ENCRYPTION_KEY, SIGNING_KEY and SESSION_COOKIE were all
-  // sensitive to isSensitiveKey and all invisible here. Any word added to
-  // SENSITIVE_WORDS now covers free text automatically.
-  {
-    name: 'sensitive-assignment',
-    // ? & # are excluded from the VALUE so a URL cannot be swallowed whole.
-    // Without that, "https://h/v1?access_token=x" matched key "https", value
-    // "//h/v1?access_token=x", came back not-sensitive, and consumed the real
-    // secret past it -- a broad pattern that eats text is worse than a narrow
-    // one that misses it.
-    re: /\b([A-Za-z][A-Za-z0-9_-]*)(["']?\s*[:=]\s*["']?)([^\s,;}\]"'?&#]+)/g,
-  },
+  // the whole pattern missed -- leaking the credential in full. The scheme
+  // allows digits because OAuth2 is a real one.
+  //
+  // Known and ACCEPTED over-reach: "authorization: Server authentication
+  // failed" becomes "authorization: [redacted] failed", because a long word is
+  // indistinguishable from an opaque token. Every rule that would tell them
+  // apart -- requiring a digit, requiring punctuation, requiring 24+ characters
+  // -- also misses a real credential (a 20-character Basic blob, a pure-alpha
+  // token). This layer errs toward losing a diagnostic rather than leaking.
+  { name: 'auth-header', re: /\b((?:proxy-)?authorization["']?\s*[:=]\s*["']?)(?:[A-Za-z][A-Za-z0-9-]*\s+)?[A-Za-z0-9._~+/=-]{12,}/gi },
 ];
 
 /**
@@ -149,6 +142,47 @@ const VALUE_PATTERNS: Array<{ name: string; re: RegExp }> = [
  * "password=hunter2" is a leak whether or not the key is compound.
  */
 const STANDALONE_SECRET_WORDS = new Set(['password', 'passwd', 'passphrase', 'secret', 'apikey', 'credential', 'credentials']);
+
+/**
+ * Scrub `key=value` / `"key": "value"` for ANY key, with isSensitiveKey() -- not
+ * a regex alternation -- deciding whether the value is a secret. The
+ * alternation this replaces was a third copy of the policy and had already
+ * drifted from the other two: ENCRYPTION_KEY, SIGNING_KEY and SESSION_COOKIE
+ * were all sensitive to isSensitiveKey and all invisible in free text.
+ *
+ * This is a manual scan rather than a `String.replace` because a global regex
+ * CONSUMES what it matches, and a harmless pair swallowing a secret is worse
+ * than no pattern at all:
+ *
+ *   payload={access_token=<secret>}   matched key "payload", value
+ *                                     "{access_token=<secret>", found it
+ *                                     harmless, and consumed the secret.
+ *   https://h/v1?access_token=<s>     matched key "https", value "//h/v1…".
+ *
+ * On a harmless pair the cursor is therefore rewound to just after the
+ * separator, so a nested assignment is still examined. lastIndex strictly
+ * increases (the key is at least one character), so the loop always terminates.
+ */
+function redactAssignments(input: string): string {
+  const re = /\b([A-Za-z][A-Za-z0-9_.-]*)(["']?\s*[:=]\s*["']?)([^\s,;}\]"'?&#]+)/g;
+  let out = '';
+  let cursor = 0;
+  let match: RegExpExecArray | null = re.exec(input);
+  while (match !== null) {
+    const [whole, key, sep, value] = match as unknown as [string, string, string, string];
+    // An earlier pattern may already have scrubbed this value; re-matching it
+    // re-emits the placeholder and strips its closing bracket.
+    if (!value.startsWith('[redacted') && assignmentIsSecret(key)) {
+      out += input.slice(cursor, match.index) + key + sep + REDACTED;
+      cursor = match.index + whole.length;
+      re.lastIndex = cursor;
+    } else {
+      re.lastIndex = match.index + key.length + sep.length;
+    }
+    match = re.exec(input);
+  }
+  return out + input.slice(cursor);
+}
 
 /** Whether `key = value` in free text should have its value scrubbed. */
 function assignmentIsSecret(key: string): boolean {
@@ -182,18 +216,13 @@ export function redactText(input: string): string {
       out = out.replace(re, (_m, prefix: string) => `${prefix}${REDACTED}`);
     } else if (name === 'url-credentials') {
       out = out.replace(re, (_m, prefix: string) => `${prefix}:${REDACTED}@`);
-    } else if (name === 'sensitive-assignment') {
-      out = out.replace(re, (match: string, key: string, sep: string, value: string) => {
-        // An earlier pattern may already have scrubbed this value; re-matching
-        // it re-emits the placeholder and strips its closing bracket.
-        if (value.startsWith('[redacted')) return match;
-        return assignmentIsSecret(key) ? `${key}${sep}${REDACTED}` : match;
-      });
     } else {
       out = out.replace(re, REDACTED);
     }
   }
-  return out;
+  // Last, so the shape patterns have already run and their placeholders are
+  // recognisable to the scanner.
+  return redactAssignments(out);
 }
 
 /** True when an object key's NAME implies its value is a secret. */
@@ -227,6 +256,9 @@ export function isSensitiveKey(key: string): boolean {
 }
 
 const MAX_REDACT_DEPTH = 12;
+
+/** The shared prototype of every typed array; not exposed as a global. */
+const TYPED_ARRAY = Object.getPrototypeOf(Uint8Array) as new () => object;
 
 /**
  * Deep-redact an arbitrary value: sensitive keys lose their values entirely,
@@ -266,28 +298,67 @@ export function redactValue(value: unknown, depth = 0, seen = new WeakSet<object
     // credential exactly, having never been near redactText. Report the shape
     // and the size, which is all a log line can usefully say about bytes.
     if (value instanceof ArrayBuffer) return `[ArrayBuffer ${value.byteLength} bytes]`;
-    if (ArrayBuffer.isView(value)) {
-      const kind = value.constructor?.name ?? 'TypedArray';
-      return `[${kind} ${value.byteLength} bytes]`;
+    // instanceof, not ArrayBuffer.isView. isView tests an internal slot, which a
+    // Proxy does not have, so ArrayBuffer.isView(new Proxy(buffer, {})) is false
+    // and a proxy-wrapped secret byte-dumped anyway. instanceof walks the
+    // prototype chain, which a Proxy DOES forward, and it also covers subclasses.
+    if (value instanceof TYPED_ARRAY || value instanceof DataView) {
+      // || not ??: an anonymous subclass has a name of '', not undefined.
+      const kind = (value as { constructor?: { name?: string } }).constructor?.name || 'TypedArray';
+      // Reading .byteLength needs the same internal slot ArrayBuffer.isView
+      // needed, so on a Proxy the getter THROWS even though instanceof matched.
+      // Identifying an exotic object and reading it are two different problems;
+      // fixing only the first turned a byte-dump into an exception, inside a
+      // function whose contract is never to throw on an error path.
+      try {
+        return `[${kind} ${(value as { byteLength: number }).byteLength} bytes]`;
+      } catch {
+        return `[${kind} of unreadable length]`;
+      }
     }
     // Map and Set have no own enumerable properties, so Object.entries returned
     // "{}" and the contents vanished. That loses diagnostics rather than
     // leaking, but a redactor that silently eats data gets worked around.
-    if (value instanceof Map) {
-      const out: Record<string, JsonValue> = {};
-      for (const [key, item] of value.entries()) {
-        const name = typeof key === 'string' ? key : String(key);
-        out[name] = isSensitiveKey(name) ? REDACTED : redactValue(item, depth + 1, seen);
+    if (value instanceof Map || value instanceof Set) {
+      // A Proxy passes instanceof but throws TypeError from .entries(), because
+      // the method needs an internal slot the proxy lacks. This function runs on
+      // error paths, where throwing again destroys the original failure, so an
+      // unreadable collection degrades to a label instead.
+      try {
+        if (value instanceof Map) {
+          const out: Record<string, JsonValue> = {};
+          for (const [key, item] of value.entries()) {
+            // The KEY can be the secret: new Map([[token, 'ok']]) would
+            // otherwise emit the token as a property name.
+            const name = redactText(typeof key === 'string' ? key : String(key));
+            out[name] = isSensitiveKey(name) ? REDACTED : redactValue(item, depth + 1, seen);
+          }
+          return out;
+        }
+        return [...value.values()].map((item) => redactValue(item, depth + 1, seen));
+      } catch {
+        return `[unreadable ${value.constructor?.name ?? 'collection'}]`;
       }
-      return out;
-    }
-    if (value instanceof Set) {
-      return [...value.values()].map((item) => redactValue(item, depth + 1, seen));
     }
 
+    // Object.keys rather than Object.entries, and the read is guarded: entries
+    // INVOKES getters, so one property whose getter throws took the whole
+    // redaction down -- and this function is called by error handlers, where
+    // throwing again loses the failure the caller was trying to report.
     const out: Record<string, JsonValue> = {};
-    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = isSensitiveKey(key) ? REDACTED : redactValue(item, depth + 1, seen);
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      if (isSensitiveKey(key)) {
+        out[key] = REDACTED;
+        continue;
+      }
+      let item: unknown;
+      try {
+        item = (value as Record<string, unknown>)[key];
+      } catch {
+        out[key] = '[unreadable]';
+        continue;
+      }
+      out[key] = redactValue(item, depth + 1, seen);
     }
     return out;
   }
@@ -300,10 +371,9 @@ export function redactValue(value: unknown, depth = 0, seen = new WeakSet<object
  * key names but drops every suspicious value, and never echoes a value merely
  * because its name looked innocuous.
  *
- * Nothing in src/ calls this yet -- the docstring used to claim it backed
- * "doctor output", which does not exist. It is kept because the moment anything
- * dumps the environment this is the only correct way to do it, and it is
- * covered by tests so it cannot rot.
+ * Nothing in src/ calls this. The doctor it was written for is scripts/doctor.ts,
+ * a dev script outside the server process -- which is worth redacting anyway,
+ * because doctor output is the thing a human pastes into an issue or a chat.
  */
 export function redactEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const out: Record<string, string> = {};
