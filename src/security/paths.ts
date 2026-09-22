@@ -1,5 +1,6 @@
 import { realpathSync } from 'node:fs';
-import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { FilesystemScopeConfig } from './types.js';
 
 /**
@@ -59,6 +60,27 @@ export function resolveExistingAncestor(path: string): string {
   }
 }
 
+/**
+ * Expand a leading `~` the way a shell would, or refuse the path.
+ *
+ * resolve() treats `~` as an ordinary directory name, so `~/.ssh/id_rsa`
+ * became `<cwd>/~/.ssh/id_rsa` -- lexically INSIDE the project root, because
+ * the server's working directory is a project -- and check() allowed it. The
+ * tool downstream then expands `~` for real and writes to the home directory.
+ * A scope check is only as good as its agreement with whatever finally opens
+ * the file.
+ *
+ * `~user` is refused rather than guessed: resolving another account's home
+ * requires /etc/passwd, and treating it as a literal directory name is exactly
+ * the bug above.
+ */
+function expandHome(candidate: string): string | null {
+  if (candidate === '~') return homedir();
+  if (candidate.startsWith('~/')) return join(homedir(), candidate.slice(2));
+  if (candidate.startsWith('~')) return null;
+  return candidate;
+}
+
 export class FilesystemScope {
   private readonly projectRoots: string[];
   private readonly readablePaths: string[];
@@ -77,7 +99,15 @@ export class FilesystemScope {
    * a denied path.
    */
   check(candidate: string, access: ScopeAccess): ScopeDecision {
-    const lexical = resolve(candidate);
+    const expanded = expandHome(candidate);
+    if (expanded === null) {
+      return {
+        allowed: false,
+        reason: `cannot resolve a home-relative path for another user (${candidate})`,
+        resolvedPath: candidate,
+      };
+    }
+    const lexical = resolve(expanded);
     const real = resolveExistingAncestor(lexical);
 
     for (const denied of this.deniedPaths) {

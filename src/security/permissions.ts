@@ -1,5 +1,6 @@
 import type { PermissionClass, PermissionClassification } from '../types/permissions.js';
 import { redactText } from './redaction.js';
+import { fileURLToPath } from 'node:url';
 import type { FilesystemScope } from './paths.js';
 
 /**
@@ -170,7 +171,13 @@ const BENIGN_PATH_PREFIXES = [
 
 /** Locations whose contents are credentials or system control surfaces. */
 const SENSITIVE_PATH_PATTERN =
-  /(\/\.ssh\/|\/\.aws\/|\/\.gnupg\/|\/\.config\/gcloud|\/\.kube\/|authorized_keys|id_rsa|id_ed25519|\/etc\/(shadow|passwd|sudoers)|\/root\/|\.pem$|\.p12$|\.pfx$|(^|\/)\.env(\.|$))/;
+  // /proc/<pid>/ is here rather than merely absent from BENIGN_PATH_PREFIXES
+  // because the sensitive test runs FIRST, so it wins over the /proc/ prefix
+  // that keeps /proc/cpuinfo usable. /proc/self/environ dumps the worker's
+  // environment -- every token this process holds -- and was classified
+  // READ_ONLY and auto-allowed, while the explicit rule on `env` and `printenv`
+  // called the same information PROHIBITED. Both cannot be right.
+  /(\/\.ssh\/|\/\.aws\/|\/\.gnupg\/|\/\.config\/gcloud|\/\.kube\/|authorized_keys|id_rsa|id_ed25519|(^|[\s/])etc\/(shadow|passwd|sudoers)|\/root\/|\/proc\/(self|thread-self|[0-9]+)\/|\.pem$|\.p12$|\.pfx$|(^|\/)\.env(\.|$))/;
 
 /**
  * Pull filesystem paths out of a shell command.
@@ -189,6 +196,41 @@ export function extractBashPaths(command: string): string[] {
     if (candidate === undefined || candidate.length < 2) continue;
     paths.push(candidate);
   }
+  return paths;
+}
+
+/**
+ * Relative paths that climb out of the working directory.
+ *
+ * extractBashPaths only matches absolute and `~` paths, so
+ * `cat ../../../../etc/passwd` yielded NO paths at all and was classified
+ * READ_ONLY on the strength of the verb alone. The worker's cwd is the project
+ * directory, so any `..` segment is a path that may leave the project, and this
+ * classifier has no cwd with which to resolve it -- which is the argument for
+ * asking rather than for guessing.
+ */
+export function extractBashRelativePaths(command: string): string[] {
+  const paths: string[] = [];
+  const pattern = /(?:^|[\s"'=:(<>|])((?:\.\.\/)+[A-Za-z0-9._~\-/]*|\.\.)(?=$|[\s"';)&|])/g;
+  for (const match of command.matchAll(pattern)) {
+    const candidate = match[1];
+    if (candidate !== undefined) paths.push(candidate);
+  }
+  return paths;
+}
+
+/**
+ * Paths built out of a shell variable, which cannot be resolved here at all.
+ *
+ * `awk '{print}' $HOME/.gnupg/secring.gpg` extracted nothing and was
+ * auto-allowed. Only a variable immediately followed by a slash counts, so
+ * `echo $PATH` and `$(date)` are left alone: the point is to catch a path whose
+ * value this process cannot know, not to escalate every use of a variable.
+ */
+export function extractBashUnresolvablePaths(command: string): string[] {
+  const paths: string[] = [];
+  const pattern = /\$\{?[A-Za-z_][A-Za-z0-9_]*\}?\/[A-Za-z0-9._~\-/${}]*/g;
+  for (const match of command.matchAll(pattern)) paths.push(match[0]);
   return paths;
 }
 
@@ -222,6 +264,35 @@ function escalateForBashPaths(
       };
     }
   }
+
+  // Paths this classifier cannot resolve: relative ones (no cwd here) and ones
+  // assembled from a shell variable (no environment here). Neither can be
+  // scope-checked, so neither may be auto-allowed on the strength of the verb.
+  for (const rawPath of [...extractBashRelativePaths(command), ...extractBashUnresolvablePaths(command)]) {
+    if (SENSITIVE_PATH_PATTERN.test(rawPath)) {
+      return { class: 'PROHIBITED', reason: `references a sensitive location (${rawPath})` };
+    }
+    result = {
+      class: maxClass(result.class, 'EXTERNAL_SIDE_EFFECT'),
+      reason: `references a path this system cannot resolve, so its scope cannot be checked (${rawPath})`,
+    };
+  }
+
+  // Last resort: a sensitive location named anywhere in the command line, even
+  // where no extractor can see it as a path. `tar -czf /tmp/x.tgz -C / etc/shadow`
+  // reads the shadow file through a BARE relative argument, and extracting every
+  // bare relative token is not possible -- in a shell command every word looks
+  // like one. So the whole string is scanned, and the result is escalated to
+  // approval rather than refused: unlike an extracted path, a match here may be
+  // an honest mention, such as `grep -rn authorized_keys docs/`. (A private key
+  // named anywhere is already PROHIBITED outright by a rule above, so this
+  // escalation never weakens that.)
+  if (SENSITIVE_PATH_PATTERN.test(command)) {
+    result = {
+      class: maxClass(result.class, 'EXTERNAL_SIDE_EFFECT'),
+      reason: 'names a sensitive location somewhere in the command line',
+    };
+  }
   return result;
 }
 
@@ -231,6 +302,17 @@ export function extractPaths(toolName: string, input: Record<string, unknown>): 
   for (const key of ['file_path', 'path', 'notebook_path', 'filePath', 'target_file']) {
     const value = input[key];
     if (typeof value === 'string' && value !== '') paths.push(value);
+  }
+  // A file:// URL is a filesystem read wearing a URL. WebFetch is classified
+  // READ_ONLY and takes a `url`, not a `file_path`, so nothing was extracted
+  // and nothing was scope-checked.
+  const url = input['url'];
+  if (typeof url === 'string' && /^file:\/\//i.test(url)) {
+    try {
+      paths.push(fileURLToPath(url));
+    } catch {
+      paths.push(url);
+    }
   }
   if (toolName === 'Glob' || toolName === 'Grep') {
     const value = input['path'];
