@@ -134,7 +134,7 @@ export interface ContextCapability {
 export interface ContextAssemblyWarning {
   providerId: string;
   /** Why the section is missing or reduced. */
-  reason: 'timeout' | 'error' | 'unavailable' | 'trimmed' | 'dropped' | 'oversized';
+  reason: 'timeout' | 'error' | 'unavailable' | 'trimmed' | 'dropped' | 'oversized' | 'unknown';
   message: string;
 }
 

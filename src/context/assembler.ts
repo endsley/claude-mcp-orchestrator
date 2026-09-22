@@ -99,7 +99,10 @@ export class ContextAssembler {
       providers.map(({ id, provider }) => () => this.fetch(id, provider, input, profileName, budgetTokens, requestId)),
     );
     const timings = Object.fromEntries(results.map((result) => [result.providerId, result.elapsedMs]));
-    const warnings = results.flatMap((result) => result.warning === undefined ? [] : [result.warning]);
+    const warnings = [
+      ...this.unknownRequests(input),
+      ...results.flatMap((result) => (result.warning === undefined ? [] : [result.warning])),
+    ];
     const ordered = results
       .flatMap((result) => result.section === null ? [] : [{ ...result, section: result.section }])
       .sort((left, right) => right.priority - left.priority || (right.section.relevance ?? 0.5) - (left.section.relevance ?? 0.5) || left.providerId.localeCompare(right.providerId));
@@ -208,6 +211,33 @@ export class ContextAssembler {
         }
       }
       return capability;
+    }));
+  }
+
+  /**
+   * Names a caller asked for that this server does not have.
+   *
+   * A mistyped PROFILE throws PROFILE_NOT_FOUND and the caller learns
+   * immediately. A mistyped provider id in `include` was silently dropped, so
+   * a model that asked for memory context and got none had no way to tell
+   * "there is nothing in memory" from "you spelled it wrong" -- and would then
+   * answer as though memory were empty. Two spellings of the same mistake,
+   * opposite treatment, in the same file.
+   *
+   * Reported rather than thrown, because unlike a profile an unknown id does
+   * not make the request meaningless: the rest of the context is still worth
+   * returning. The available ids go in the message, since the reader is a
+   * model that can retry with the right one.
+   */
+  private unknownRequests(input: ContextAssemblyInput): ContextAssemblyWarning[] {
+    const asked = [...(input.include ?? []), ...(input.exclude ?? [])];
+    const unknown = asked.filter((id) => this.registry.get(id) === undefined);
+    if (unknown.length === 0) return [];
+    const available = this.registry.list().map((provider) => provider.id).sort().join(', ');
+    return unknown.map((id) => ({
+      providerId: id,
+      reason: 'unknown' as const,
+      message: `No context provider is called "${id}"; available ids are ${available}.`,
     }));
   }
 

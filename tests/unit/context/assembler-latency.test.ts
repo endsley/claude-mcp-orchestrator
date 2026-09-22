@@ -343,3 +343,64 @@ describe('a trimmed section is not a gap', () => {
     expect(assembled.text).not.toMatch(/CONTEXT GAPS/);
   }, 20_000);
 });
+
+/**
+ * Asking for a provider that does not exist.
+ *
+ * A mistyped PROFILE throws PROFILE_NOT_FOUND and the caller learns at once. A
+ * mistyped provider id in `include` was silently dropped -- so a model that
+ * asked for memory context and received none could not tell "there is nothing
+ * in memory" from "you spelled it wrong", and would answer as though memory
+ * were empty. Two spellings of one mistake, opposite treatment, in the same
+ * file.
+ *
+ * Reported rather than thrown, because unlike a bad profile an unknown id does
+ * not make the request meaningless -- the rest of the context is still worth
+ * returning.
+ */
+describe('a provider id the server does not have', () => {
+  function assembler(ids: string[]): ContextAssembler {
+    const registry = new ContextProviderRegistry();
+    registry.register(new SlowProbeProvider('projects', 1, 1));
+    registry.register(new SlowProbeProvider('memory', 1, 1));
+    return new ContextAssembler(registry, configuration(ids));
+  }
+
+  it('names the mistake and the ids that would have worked', async () => {
+    // The reader is a model that can retry, so the message has to contain
+    // enough for it to retry correctly.
+    const assembled = await assembler(['projects']).assemble({ include: ['memroy'] });
+
+    expect(assembled.text).toMatch(/CONTEXT GAPS/);
+    expect(assembled.text).toContain('memroy');
+    expect(assembled.text).toMatch(/available ids are .*memory/);
+    expect(assembled.warnings.some((warning) => warning.reason === 'unknown')).toBe(true);
+  }, 20_000);
+
+  it('still returns the context that was available', async () => {
+    // Not an exception: the rest of the answer is worth having.
+    const assembled = await assembler(['projects']).assemble({ include: ['memroy'] });
+    expect(assembled.sections.map((section) => section.providerId)).toEqual(['projects']);
+  }, 20_000);
+
+  it('reports a mistyped exclude too', async () => {
+    // Excluding something that does not exist silently does nothing, which
+    // looks identical to the exclusion having worked.
+    const assembled = await assembler(['projects']).assemble({ exclude: ['prjects'] });
+    expect(assembled.text).toContain('prjects');
+  }, 20_000);
+
+  it('says nothing when every requested id is real', async () => {
+    const assembled = await assembler(['projects']).assemble({ include: ['memory'] });
+    expect(assembled.text).not.toMatch(/CONTEXT GAPS/);
+    expect(assembled.sections.map((section) => section.providerId).sort()).toEqual(['memory', 'projects']);
+  }, 20_000);
+
+  it('still throws for a mistyped profile, which IS meaningless', async () => {
+    // The distinction being drawn: a bad profile leaves nothing to answer
+    // with, a bad include leaves the rest.
+    await expect(assembler(['projects']).assemble({ profile: 'codeing' })).rejects.toMatchObject({
+      code: 'PROFILE_NOT_FOUND',
+    });
+  }, 20_000);
+});
