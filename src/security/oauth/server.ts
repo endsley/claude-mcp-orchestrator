@@ -444,6 +444,20 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
       const refreshToken = typeof body['refresh_token'] === 'string' ? body['refresh_token'] : '';
       const rotated = store.rotateRefreshToken(refreshToken, options.refreshTokenTtlMs);
       if (!rotated) {
+        // A refused refresh may be a replay of an already-rotated token,
+        // which is the classic token-theft signal. Refusing the request is
+        // not enough on its own: whoever won the rotation still holds a
+        // working descendant. classifyRefreshReplay decides whether this
+        // looks like theft or like a client retrying within moments, and only
+        // the former revokes the chain - a naive version without that
+        // distinction turned an ordinary concurrent retry into a forced
+        // re-consent.
+        const replay = store.classifyRefreshReplay(refreshToken);
+        if (replay.verdict === 'theft') {
+          logger.warn('refresh token reuse detected; revoked the rotation chain', {
+            revoked: replay.revoked,
+          });
+        }
         oauthError(res, 400, 'invalid_grant', 'refresh token is invalid, expired or already used');
         return;
       }

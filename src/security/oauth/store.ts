@@ -3,6 +3,14 @@ import type { Db } from '../../db/database.js';
 import { orchestratorError } from '../../types/errors.js';
 import { hashSecret, mintSecret } from './tokens.js';
 
+/**
+ * How long after a rotation a replay of the old refresh token is treated as
+ * a benign retry rather than theft. Concurrent refreshes and post-timeout
+ * retries land within moments; a thief replaying a stolen token generally
+ * does not.
+ */
+const REFRESH_REPLAY_GRACE_MS = 10_000;
+
 export interface OAuthClient {
   clientId: string;
   clientName?: string;
@@ -292,6 +300,74 @@ export class OAuthStore {
         .run(this.now(), hashSecret(next.token), hashSecret(oldToken));
       if (revoked.changes === 0) return undefined;
       return { record, next };
+    });
+    return run();
+  }
+
+  /**
+   * Classify a refused refresh, and on a genuine replay revoke the chain.
+   *
+   * `rotated_to` has been written on every rotation since the schema was
+   * created and read nowhere, so the server could see a replay - it answered
+   * 400 - and then take no action against the credential the other party was
+   * still holding. OAuth 2.1's security BCP says revoke the descendant chain
+   * on detected reuse.
+   *
+   * The grace window is the part that makes this safe to turn on. A client
+   * that fires two refreshes concurrently, or retries after a dropped
+   * response, presents the same token twice within moments and is not a
+   * thief. Revoking the chain for that turns an ordinary network hiccup into
+   * a forced re-consent - which is exactly what an earlier naive version of
+   * this did, caught by the concurrency tests. So a replay within the window
+   * is refused without punishment, and only a later one is treated as theft.
+   *
+   * `revoked_at` is written at rotation time, so it doubles as the rotation
+   * timestamp; no extra column is needed.
+   */
+  classifyRefreshReplay(
+    token: string,
+    graceMs: number = REFRESH_REPLAY_GRACE_MS,
+    now: Date = new Date(),
+  ): { verdict: 'retry' | 'theft' | 'unrelated'; revoked: number } {
+    const row = this.db
+      .prepare('SELECT kind, revoked_at, rotated_to FROM oauth_tokens WHERE token_hash = ?')
+      .get(hashSecret(token)) as { kind: string; revoked_at: string | null; rotated_to: string | null } | undefined;
+
+    // Unknown token, wrong kind, or one that was revoked by something other
+    // than a rotation (an admin revoke): none of these is a reuse signal.
+    if (row === undefined || row.kind !== 'refresh') return { verdict: 'unrelated', revoked: 0 };
+    if (row.revoked_at === null || row.rotated_to === null) return { verdict: 'unrelated', revoked: 0 };
+
+    const rotatedAt = Date.parse(row.revoked_at);
+    if (!Number.isFinite(rotatedAt)) return { verdict: 'unrelated', revoked: 0 };
+    // graceMs of 0 means no grace at all, so an elapsed time of 0 must not
+    // count as inside the window.
+    if (graceMs > 0 && now.getTime() - rotatedAt <= graceMs) return { verdict: 'retry', revoked: 0 };
+
+    return { verdict: 'theft', revoked: this.revokeRotationChain(token, now) };
+  }
+
+  /** Revoke every token reachable by following `rotated_to` forward. */
+  private revokeRotationChain(from: string, now: Date): number {
+    const run = this.db.transaction(() => {
+      let hash: string | undefined = hashSecret(from);
+      const seen = new Set<string>();
+      let revoked = 0;
+      while (hash !== undefined && !seen.has(hash)) {
+        seen.add(hash);
+        const row = this.db
+          .prepare('SELECT rotated_to, revoked_at FROM oauth_tokens WHERE token_hash = ?')
+          .get(hash) as { rotated_to: string | null; revoked_at: string | null } | undefined;
+        if (row === undefined) break;
+        if (row.revoked_at === null) {
+          this.db
+            .prepare('UPDATE oauth_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL')
+            .run(now.toISOString(), hash);
+          revoked += 1;
+        }
+        hash = row.rotated_to ?? undefined;
+      }
+      return revoked;
     });
     return run();
   }
