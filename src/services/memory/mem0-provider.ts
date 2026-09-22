@@ -81,7 +81,10 @@ export class Mem0HttpMemoryProvider implements MemoryProvider {
       top_k: Math.max(1, Math.min(input.limit ?? 8, 20)),
       threshold: 0.5,
       show_expired: false,
-      explain: true,
+      // recordFromRow reads id, text, score, topic, subtopic, created_at and
+      // metadata - never an explanation. Asking for one only enlarges every
+      // search response on the voice path.
+      explain: false,
     }, input.signal);
     const rows = typeof response === 'object' && response !== null && Array.isArray((response as { results?: unknown }).results)
       ? (response as { results: unknown[] }).results
@@ -164,6 +167,11 @@ export class Mem0HttpMemoryProvider implements MemoryProvider {
           throw orchestratorError('MEMORY_UNAVAILABLE', 'Mem0 rejected the request.', { retryable: false, cause: error });
         }
         lastError = error;
+        // A local timeout SHOULD fall through to the backup base - that is
+        // what the backup is for. Caller cancellation is different: the
+        // assembler has already stopped waiting, so a second request spends
+        // time and a round trip on a result nobody will read.
+        if (externalSignal?.aborted === true) break;
       } finally {
         clearTimeout(timer);
         externalSignal?.removeEventListener('abort', abort);
