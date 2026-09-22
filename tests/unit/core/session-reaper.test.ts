@@ -183,3 +183,69 @@ describe('session reaper', () => {
     manager.stopReaper();
   });
 });
+
+/**
+ * A question or approval that nobody answers must not leave the session
+ * claiming it is still waiting. The worker fails closed and carries on; the
+ * status has to say so too.
+ */
+describe('status after an unanswered request', () => {
+  function buildWithShortTimeout(): { manager: SessionManager; store: WorkSessionStore; workers: FakeWorker[] } {
+    const freshDb = openTestDatabase(createNullLogger());
+    const freshStore = new WorkSessionStore(freshDb, 100);
+    const built: FakeWorker[] = [];
+    const config = appConfigSchema.parse({});
+    const freshManager = new SessionManager({
+      store: freshStore,
+      broker: new PendingRequestBroker(freshStore),
+      activeContext: new ActiveContextStore(freshDb),
+      projects,
+      computers,
+      scope: new FilesystemScope({
+        projectRoots: ['/tmp/demo'],
+        additionalReadablePaths: [],
+        deniedPaths: [],
+        allowOutsideProjectRead: false,
+        allowOutsideProjectWrite: false,
+      }),
+      claudeConfig: config.claude,
+      // Short enough to time out inside a test.
+      securityConfig: { ...config.security, pendingRequestTimeoutMs: 40 },
+      logger: createNullLogger(),
+      createWorker: ({ callbacks }) => {
+        const worker = new FakeWorker(callbacks);
+        built.push(worker);
+        return worker;
+      },
+    });
+    return { manager: freshManager, store: freshStore, workers: built };
+  }
+
+  it('returns to working when an approval is never answered', async () => {
+    const ctx = buildWithShortTimeout();
+    const { sessionId } = await ctx.manager.startSession({ instruction: 'Fix the nav', project: 'demo' });
+
+    await expect(
+      ctx.workers[0]!.callbacks.requestApproval({
+        question: 'Allow the delete?',
+        toolName: 'Bash',
+        toolSummary: 'rm -rf build',
+        permissionClass: 'DESTRUCTIVE',
+      }),
+    ).rejects.toThrow();
+
+    // Before the fix this stayed 'awaiting_approval' with no request to answer.
+    expect(ctx.store.getOrThrow(sessionId).status).toBe('working');
+    expect(ctx.store.getOpenRequest(sessionId)).toBeUndefined();
+  });
+
+  it('returns to working when a question is never answered', async () => {
+    const ctx = buildWithShortTimeout();
+    const { sessionId } = await ctx.manager.startSession({ instruction: 'Fix the nav', project: 'demo' });
+
+    await expect(ctx.workers[0]!.callbacks.askUser('Which component?', ['a', 'b'])).rejects.toThrow();
+
+    expect(ctx.store.getOrThrow(sessionId).status).toBe('working');
+    expect(ctx.store.getOpenRequest(sessionId)).toBeUndefined();
+  });
+});

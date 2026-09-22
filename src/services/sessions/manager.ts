@@ -566,29 +566,39 @@ export class SessionManager {
       askUser: async (question, choices) => {
         this.store.setStatus(sessionId, 'needs_input', { summary: question, step: null });
         this.store.appendProgress(sessionId, 'question', `Asked: ${question}`);
-        const result = await this.broker.ask({
-          workSessionId: sessionId,
-          type: 'question',
-          question,
-          ...(choices ? { choices } : {}),
-          timeoutMs: this.deps.securityConfig.pendingRequestTimeoutMs,
-        });
-        return result.answer;
+        try {
+          const result = await this.broker.ask({
+            workSessionId: sessionId,
+            type: 'question',
+            question,
+            ...(choices ? { choices } : {}),
+            timeoutMs: this.deps.securityConfig.pendingRequestTimeoutMs,
+          });
+          return result.answer;
+        } catch (error) {
+          this.clearUnansweredStatus(sessionId, 'question');
+          throw error;
+        }
       },
       requestApproval: async ({ question, toolName, toolSummary, permissionClass }) => {
         this.store.setStatus(sessionId, 'awaiting_approval', { summary: question, step: null });
         this.store.appendProgress(sessionId, 'approval', `Approval needed: ${toolSummary}`);
-        const result = await this.broker.ask({
-          workSessionId: sessionId,
-          type: 'approval',
-          question,
-          choices: ['Yes, do it', 'No, skip it'],
-          toolName,
-          toolSummary,
-          permissionClass,
-          timeoutMs: this.deps.securityConfig.pendingRequestTimeoutMs,
-        });
-        return !result.denied;
+        try {
+          const result = await this.broker.ask({
+            workSessionId: sessionId,
+            type: 'approval',
+            question,
+            choices: ['Yes, do it', 'No, skip it'],
+            toolName,
+            toolSummary,
+            permissionClass,
+            timeoutMs: this.deps.securityConfig.pendingRequestTimeoutMs,
+          });
+          return !result.denied;
+        } catch (error) {
+          this.clearUnansweredStatus(sessionId, 'approval');
+          throw error;
+        }
       },
     };
 
@@ -644,6 +654,30 @@ export class SessionManager {
     };
     this.store.setStatus(sessionId, 'idle', { summary, step: null, result });
     this.store.appendProgress(sessionId, 'completed', summary);
+  }
+
+  /**
+   * Put a session back to `working` after a question or approval went
+   * unanswered.
+   *
+   * The broker voids the request row and rejects, and the worker fails closed
+   * by denying that one tool and carrying on - which is the right behaviour.
+   * But the status was set to needs_input/awaiting_approval before the ask,
+   * and nothing moved it back, so get_work_session_status reported a session
+   * waiting on a question that no longer exists: `respond` would answer with
+   * PENDING_REQUEST_NOT_FOUND while the status invited the user to answer.
+   * It self-healed on the next completed turn, which is not much comfort to
+   * someone looking at a quiet session.
+   */
+  private clearUnansweredStatus(sessionId: string, kind: 'question' | 'approval'): void {
+    const session = this.store.get(sessionId);
+    if (!session || isTerminalStatus(session.status)) return;
+    if (session.status !== 'needs_input' && session.status !== 'awaiting_approval') return;
+    this.store.setStatus(sessionId, 'working', {
+      summary: `No answer to the ${kind}; continuing without it.`,
+      step: null,
+    });
+    this.store.appendProgress(sessionId, 'warning', `The ${kind} went unanswered, so work continued without it.`);
   }
 
   private failSession(sessionId: string, error: unknown): void {
