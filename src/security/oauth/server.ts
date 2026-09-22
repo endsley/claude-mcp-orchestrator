@@ -301,6 +301,36 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
       }
     }
 
+    /*
+     * Validate the requested scope against what this server actually supports,
+     * per RFC 6749's invalid_scope.
+     *
+     * This is not only hygiene. The consent page RENDERS this string back to
+     * the user, and the resource server does not enforce scope at all - it
+     * checks audience only. Accepting an arbitrary value therefore let a
+     * crafted authorize link display a narrower permission than the token it
+     * produces: the screen could read "Scope: read-only" while the issued
+     * token was exactly as capable as any other. The consent screen is the
+     * control that exists so the user can see what they are approving, so it
+     * must not be able to show them attacker-supplied text as fact.
+     *
+     * A present-but-blank scope is treated as absent rather than rejected, so
+     * a client sending `scope=` still gets the default.
+     */
+    const rawScope = q['scope'];
+    const scopeRequested = rawScope !== undefined && rawScope.trim() !== '';
+    if (scopeRequested) {
+      const unsupported = rawScope!.trim().split(/\s+/).filter((value) => !options.scopesSupported.includes(value));
+      if (unsupported.length > 0) {
+        fail('invalid_scope', `supported scopes are: ${options.scopesSupported.join(' ')}`);
+        return;
+      }
+    }
+    // Computed once. It used to be written out twice, for the pending entry
+    // and for the page, which is one edit away from the screen disagreeing
+    // with the grant.
+    const grantedScope = scopeRequested ? rawScope!.trim() : options.scopesSupported.join(' ');
+
     const requestId = mintSecret(16);
     pending.set(requestId, {
       clientId,
@@ -308,7 +338,7 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
       ...(q['state'] !== undefined ? { state: q['state'] } : {}),
       codeChallenge,
       codeChallengeMethod,
-      scope: q['scope'] ?? options.scopesSupported.join(' '),
+      scope: grantedScope,
       ...(q['resource'] !== undefined ? { resource: q['resource'] } : {}),
       expiresAt: Date.now() + 10 * 60_000,
     });
@@ -318,7 +348,7 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
       clientName: client.clientName ?? client.clientId,
       redirectUri,
       resource,
-      scope: q['scope'] ?? options.scopesSupported.join(' '),
+      scope: grantedScope,
     }));
   });
 

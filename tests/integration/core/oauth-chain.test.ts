@@ -191,3 +191,76 @@ describe('access tokens are chained by the server, not just by the store', () =>
     expect(await callMcp(second.accessToken)).toBe(200);
   }, 30_000);
 });
+
+/**
+ * The consent page renders the requested scope, and the resource server does
+ * not enforce scope at all - it checks audience only. So an unvalidated scope
+ * let a crafted authorize link show the user a narrower permission than the
+ * token it produced. The consent screen exists so the user can see what they
+ * are approving; it must not be able to show them attacker-supplied text.
+ */
+describe('requested scope is validated before it is shown to anyone', () => {
+  async function authorizeWith(scope: string | undefined): Promise<Response> {
+    const reg = await fetch(`${base}/oauth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ client_name: 'Scope', redirect_uris: [REDIRECT_URI] }),
+    });
+    const { client_id: clientId } = (await reg.json()) as { client_id: string };
+    const { challenge } = pkce();
+    const params: Record<string, string> = {
+      client_id: clientId,
+      redirect_uri: REDIRECT_URI,
+      response_type: 'code',
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+      state: 'xyz',
+      resource: `${issuer}/mcp`,
+    };
+    if (scope !== undefined) params['scope'] = scope;
+    return fetch(`${base}/oauth/authorize?${new URLSearchParams(params)}`, { redirect: 'manual' });
+  }
+
+  it('refuses a scope this server does not support', async () => {
+    const res = await authorizeWith('admin:everything');
+
+    expect(res.status).toBe(302);
+    const target = new URL(res.headers.get('location')!);
+    expect(target.searchParams.get('error')).toBe('invalid_scope');
+    // The state must come back so a conforming client can correlate.
+    expect(target.searchParams.get('state')).toBe('xyz');
+  });
+
+  it('never renders an unsupported scope on the consent page', async () => {
+    const res = await authorizeWith('read-only-diagnostics');
+
+    // A redirect, not a page: the crafted string never reaches the user.
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).not.toContain('read-only-diagnostics');
+  });
+
+  it('refuses a request mixing a supported and an unsupported scope', async () => {
+    const res = await authorizeWith('mcp admin:everything');
+    expect(res.status).toBe(302);
+    expect(new URL(res.headers.get('location')!).searchParams.get('error')).toBe('invalid_scope');
+  });
+
+  it('accepts the supported scope and shows it', async () => {
+    const res = await authorizeWith('mcp');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('mcp');
+  });
+
+  it('treats a present-but-blank scope as absent rather than refusing', async () => {
+    const res = await authorizeWith('');
+    // A client sending `scope=` still gets the default rather than an error.
+    expect(res.status).toBe(200);
+    await res.text();
+  });
+
+  it('still works with no scope parameter at all', async () => {
+    const res = await authorizeWith(undefined);
+    expect(res.status).toBe(200);
+    await res.text();
+  });
+});
