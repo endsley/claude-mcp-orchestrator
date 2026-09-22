@@ -143,28 +143,40 @@ describe('MCP protocol', () => {
     const result = await rpc('tools/list', {}, 2);
     const names: string[] = result.result.tools.map((tool: { name: string }) => tool.name);
 
-    for (const expected of [
-      'get_environment_context',
-      'list_context_capabilities',
-      'list_computers',
-      'get_computer',
-      'list_projects',
-      'find_project',
-      'get_project_context',
-      'recall_context',
-      'start_work_session',
-      'continue_work_session',
-      'send_work_session_instruction',
-      'get_work_session_status',
-      'get_work_session_result',
-      'respond_to_work_session',
-      'cancel_work_session',
-      'get_recent_activity',
-    ]) {
-      expect(names).toContain(expected);
-    }
+    // EXACT equality, not toContain. The old version asserted that sixteen
+    // expected names were present and that six invented ones -- run_shell,
+    // execute_bash, sudo -- were absent. Nothing is ever going to be called
+    // sudo, so that half could not fail, and the subset check could not notice
+    // a SEVENTEENTH tool appearing. The risk this guards against is not someone
+    // registering a tool called execute_bash; it is a new tool that exposes
+    // something dangerous under a reasonable-looking name.
+    //
+    // Equality makes the tool surface a decision: adding one fails here, and
+    // whoever adds it has to come and say so in this list.
+    expect([...names].sort()).toEqual(
+      [
+        'cancel_work_session',
+        'continue_work_session',
+        'find_project',
+        'get_computer',
+        'get_environment_context',
+        'get_project_context',
+        'get_recent_activity',
+        'get_work_session_result',
+        'get_work_session_status',
+        'list_computers',
+        'list_context_capabilities',
+        'list_projects',
+        'recall_context',
+        'respond_to_work_session',
+        'send_work_session_instruction',
+        'start_work_session',
+      ].sort(),
+    );
 
-    // The security boundary, asserted as a test rather than a comment.
+    // Kept for what it documents rather than for what it proves: no primitive
+    // machine-control verb belongs on this surface. The equality above is the
+    // load-bearing assertion.
     for (const forbidden of ['run_shell', 'execute_bash', 'write_any_file', 'read_any_file', 'execute_python', 'sudo']) {
       expect(names).not.toContain(forbidden);
     }
