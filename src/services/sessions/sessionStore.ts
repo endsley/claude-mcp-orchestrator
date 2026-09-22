@@ -132,6 +132,15 @@ export interface CreateWorkSessionInput {
  * transition. That read-inside-transaction is what makes concurrent
  * cancel/complete races resolve deterministically instead of both "winning".
  */
+/**
+ * The most artifacts a single read returns.
+ *
+ * listArtifacts runs on every completed turn, so an unbounded read made
+ * per-turn cost a function of the session's entire history rather than of the
+ * work in front of it.
+ */
+const MAX_ARTIFACTS_RETURNED = 50;
+
 export class WorkSessionStore {
   constructor(
     private readonly db: Db,
@@ -532,10 +541,20 @@ export class WorkSessionStore {
     return { ...input, id, createdAt: now };
   }
 
-  listArtifacts(workSessionId: string): Artifact[] {
+  /**
+   * Artifacts for a session, most recent first and BOUNDED.
+   *
+   * This is called on every completed turn to rebuild the stored result, so an
+   * unbounded read made per-turn cost grow with the session's whole history
+   * rather than with the work in front of it -- and the result row it feeds
+   * grew monotonically alongside. The cap is the most recent ones because that
+   * is what a resumed session needs; callers that hit it are told, rather than
+   * being handed a silently short list.
+   */
+  listArtifacts(workSessionId: string, limit = MAX_ARTIFACTS_RETURNED): Artifact[] {
     const rows = this.db
-      .prepare('SELECT * FROM artifacts WHERE work_session_id = ? ORDER BY created_at ASC')
-      .all(workSessionId) as Array<{
+      .prepare('SELECT * FROM artifacts WHERE work_session_id = ? ORDER BY created_at DESC LIMIT ?')
+      .all(workSessionId, limit) as Array<{
       id: string;
       work_session_id: string;
       kind: string;
@@ -557,7 +576,9 @@ export class WorkSessionStore {
       if (row.size_bytes !== null) artifact.sizeBytes = row.size_bytes;
       if (row.mime_type !== null) artifact.mimeType = row.mime_type;
       return artifact;
-    });
+    // The query takes the most recent N; callers still read them oldest-first,
+    // which is the order they were produced in.
+    }).reverse();
   }
 
   // ----------------------------------------------------- project write locks

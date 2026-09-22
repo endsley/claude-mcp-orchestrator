@@ -647,3 +647,118 @@ describe('the active-work listing does not promise a resume that will fail', () 
     expect(JSON.stringify(context)).toContain(output.sessionId);
   });
 });
+
+/**
+ * The resume prompt claimed nothing had happened while the database held
+ * hundreds of events (endsley/bodhi-inbox#38, longevity review).
+ *
+ * reconstructionPrompt took the last 20 progress events and THEN filtered them
+ * to file_changed/test/command. A research-heavy session -- questions,
+ * answers, warnings -- has a tail of exactly the kinds that filter drops, so
+ * the rebuilt worker was told "No recorded progress" and redid work that was
+ * already done and still recorded. The data survived; the usable memory of it
+ * did not.
+ *
+ * Reached through a real recovery rather than by calling the private method:
+ * a session with no claudeSessionId cannot be resumed by the SDK, so
+ * recoverWorker falls back to this prompt, which is the only path a user hits.
+ */
+describe('rebuilding a worker for a session with history', () => {
+  function withoutClaudeSession(sessionId: string): void {
+    // The SDK resume path needs this; clearing it forces the reconstruction
+    // prompt, which is the code under test.
+    db.prepare('UPDATE work_sessions SET claude_session_id = NULL WHERE id = ?').run(sessionId);
+  }
+
+  it('does not claim "no progress" when concrete work is buried behind chatter', async () => {
+    const output = await manager.startSession({ instruction: 'Fix the nav', project: 'demo' });
+    store.appendProgress(output.sessionId, 'file_changed', 'edited src/Nav.tsx');
+    store.appendProgress(output.sessionId, 'command', 'ran npm test');
+    // ...then a long tail of the kinds the old filter dropped.
+    for (let index = 0; index < 30; index += 1) {
+      store.appendProgress(output.sessionId, 'question', `clarifying question ${index}`);
+    }
+
+    manager.recoverOnStartup();
+    withoutClaudeSession(output.sessionId);
+    await manager.sendInstruction(output.sessionId, 'carry on');
+
+    const rebuilt = workers[workers.length - 1];
+    const prompt = rebuilt?.startOptions?.instruction ?? '';
+    expect(prompt).not.toMatch(/No recorded progress/);
+    expect(prompt).toContain('edited src/Nav.tsx');
+    expect(prompt).toContain('ran npm test');
+  });
+
+  it('quotes the workers own narration steps as progress', async () => {
+    const output = await manager.startSession({ instruction: 'Start', project: 'demo' });
+    store.appendProgress(output.sessionId, 'step', 'reading the router config');
+
+    manager.recoverOnStartup();
+    withoutClaudeSession(output.sessionId);
+    await manager.sendInstruction(output.sessionId, 'carry on');
+
+    const prompt = workers[workers.length - 1]?.startOptions?.instruction ?? '';
+    expect(prompt).toContain('reading the router config');
+  });
+
+  it('says events exist rather than claiming none, when none are concrete', async () => {
+    // The honest middle case: there IS history, it just does not describe file
+    // or command activity. Saying "no recorded progress" is false; saying
+    // nothing at all would leave the worker to assume the same thing.
+    const output = await manager.startSession({ instruction: 'Start', project: 'demo' });
+    store.appendProgress(output.sessionId, 'question', 'which database?');
+    store.appendProgress(output.sessionId, 'answer', 'postgres');
+
+    manager.recoverOnStartup();
+    withoutClaudeSession(output.sessionId);
+    await manager.sendInstruction(output.sessionId, 'carry on');
+
+    const prompt = workers[workers.length - 1]?.startOptions?.instruction ?? '';
+    expect(prompt).not.toMatch(/No recorded progress/);
+    expect(prompt).toMatch(/get_work_session_status/);
+  });
+
+  it('still says nothing happened when genuinely nothing did', async () => {
+    // The claim has to stay available for the case where it is true, or it
+    // stops carrying information.
+    const output = await manager.startSession({ instruction: 'Start', project: 'demo' });
+    db.prepare('DELETE FROM progress_events WHERE work_session_id = ?').run(output.sessionId);
+
+    manager.recoverOnStartup();
+    db.prepare('DELETE FROM progress_events WHERE work_session_id = ?').run(output.sessionId);
+    withoutClaudeSession(output.sessionId);
+    await manager.sendInstruction(output.sessionId, 'carry on');
+
+    const prompt = workers[workers.length - 1]?.startOptions?.instruction ?? '';
+    expect(prompt).toMatch(/No recorded progress/);
+  });
+});
+
+describe('artifact reads are bounded', () => {
+  it('returns at most the cap, choosing the most recent', async () => {
+    // listArtifacts runs on EVERY completed turn to rebuild the stored result,
+    // so an unbounded read made per-turn cost a function of the session's whole
+    // history rather than of the work in front of it, and grew the result row
+    // alongside it.
+    const output = await manager.startSession({ instruction: 'Start', project: 'demo' });
+    for (let index = 0; index < 60; index += 1) {
+      db.prepare(
+        'INSERT INTO artifacts (id, work_session_id, kind, title, path, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      ).run(
+        `art_${String(index).padStart(3, '0')}`,
+        output.sessionId,
+        'file',
+        `artifact ${index}`,
+        `/tmp/demo/a${index}.txt`,
+        new Date(1_700_000_000_000 + index * 1000).toISOString(),
+      );
+    }
+
+    const listed = store.listArtifacts(output.sessionId);
+    expect(listed).toHaveLength(50);
+    // The most recent ones, still in the order they were produced.
+    expect(listed[0]?.title).toBe('artifact 10');
+    expect(listed[listed.length - 1]?.title).toBe('artifact 59');
+  });
+});

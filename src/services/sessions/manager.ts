@@ -86,6 +86,15 @@ export interface WorkerFactoryArgs {
  * half-dead child process must not, so recovery reconstructs workers from
  * durable state rather than trying to adopt orphans.
  */
+/**
+ * How far back the resume prompt LOOKS, and how many lines it quotes.
+ *
+ * These differ on purpose. Looking only as far as you quote means a tail of
+ * questions and answers hides every concrete step behind it.
+ */
+const RECONSTRUCTION_LOOKBACK = 200;
+const RECONSTRUCTION_QUOTED = 20;
+
 export class SessionManager {
   /** Interrupted sessions older than this stop counting as current work. */
   private static readonly INTERRUPTED_CONTEXT_WINDOW_MS = 60 * 60 * 1000;
@@ -637,15 +646,38 @@ export class SessionManager {
 
   /** Compact restatement used when the Claude session cannot be resumed. */
   private reconstructionPrompt(session: WorkSession): string {
-    const events = this.store.listProgress(session.id, 20);
-    const done = events
-      .filter((e) => e.kind === 'file_changed' || e.kind === 'test' || e.kind === 'command')
+    // Look back FURTHER than we quote. Taking the last 20 events and then
+    // filtering them threw away every concrete step whenever the tail happened
+    // to be questions and answers -- so a research-heavy session told the
+    // rebuilt worker "No recorded progress" while the database held hundreds
+    // of events, and it redid work that was already done. The data survived;
+    // the usable memory of it did not.
+    const events = this.store.listProgress(session.id, RECONSTRUCTION_LOOKBACK);
+    // 'step' is the worker's own narration of what it is doing, which is
+    // exactly what "progress so far" means; excluding it was the other half.
+    const informative = events.filter(
+      (e) => e.kind === 'file_changed' || e.kind === 'test' || e.kind === 'command' || e.kind === 'step',
+    );
+    // listProgress returns newest first; quote them oldest-first so the list
+    // reads as a narrative rather than backwards.
+    const done = informative
+      .slice(0, RECONSTRUCTION_QUOTED)
+      .reverse()
       .map((e) => `- ${e.message}`)
       .join('\n');
+
+    const progress =
+      done !== ''
+        ? `Progress so far:\n${done}`
+        : events.length > 0
+          ? 'Earlier progress events are recorded for this session, but none of them describe a concrete ' +
+            'file change, command or step. Read them with get_work_session_status before assuming nothing was done.'
+          : 'No recorded progress.';
+
     return [
       'This work was interrupted and the previous conversation could not be restored.',
       `Original request: ${session.initialInstruction}`,
-      done ? `Progress so far:\n${done}` : 'No recorded progress.',
+      progress,
       'Re-check the current state of the files before continuing.',
     ].join('\n\n');
   }
