@@ -52,6 +52,28 @@ async function timed<T>(operation: (signal: AbortSignal) => Promise<T>, timeoutM
  * A single provider can time out, return malformed context, or fail without
  * taking down the environment-context MCP tool.
  */
+/**
+ * A short note naming the context that could not be GATHERED.
+ *
+ * Only provider failures. A TRIMMED section is still present, just shorter,
+ * and a DROPPED one is a budget decision this assembler made knowingly -- both
+ * are already in the structured warnings, and neither means "we could not find
+ * out". Reporting them here would also be circular, because the notice has to
+ * be sized before the budget loop runs in order to reserve room for itself.
+ *
+ * That ordering makes the two filters below UNREACHABLE today: the loop has not
+ * run when this is called, so no trimmed or dropped warning exists yet. They
+ * stay as a guard for the refactor that moves this call after the loop, and are
+ * called out here because a mutation removing them does NOT fail any test --
+ * which should not be mistaken for the filters being covered.
+ */
+function gapNotice(warnings: ContextAssemblyWarning[]): string | undefined {
+  const missing = warnings.filter((warning) => warning.reason !== 'trimmed' && warning.reason !== 'dropped');
+  if (missing.length === 0) return undefined;
+  const lines = missing.map((warning) => `- ${warning.message}`);
+  return ['CONTEXT GAPS (this context is incomplete; do not treat these as empty)', ...lines].join('\n');
+}
+
 export class ContextAssembler {
   /** Opt-in per-provider section cache, keyed by provider and request shape. */
   private readonly sectionCache = new Map<string, { section: InitialContextSection | null; expiresAt: number; budget: number }>();
@@ -82,10 +104,19 @@ export class ContextAssembler {
       .flatMap((result) => result.section === null ? [] : [{ ...result, section: result.section }])
       .sort((left, right) => right.priority - left.priority || (right.section.relevance ?? 0.5) - (left.section.relevance ?? 0.5) || left.providerId.localeCompare(right.providerId));
 
+    // Sized and reserved BEFORE the sections compete for room. Appending it
+    // afterwards made the payload exceed maxTokens, which two existing tests
+    // caught -- and they were right to: a caller that budgets against that
+    // number is entitled to have it mean something. The notice wins the
+    // reservation because a shorter list of projects is a smaller loss than
+    // not knowing the list is short.
+    const gaps = gapNotice(warnings);
+    const sectionBudget = Math.max(1, budgetTokens - (gaps === undefined ? 0 : estimateTokens(gaps)));
+
     const retained: InitialContextSection[] = [];
     let used = 0;
     for (const entry of ordered) {
-      const remaining = budgetTokens - used;
+      const remaining = sectionBudget - used;
       if (remaining <= 0) {
         warnings.push({ providerId: entry.providerId, reason: 'dropped', message: `${entry.section.title} was omitted because the context budget was exhausted.` });
         continue;
@@ -103,12 +134,26 @@ export class ContextAssembler {
         warnings.push({ providerId: entry.providerId, reason: 'trimmed', message: `${entry.section.title} was trimmed to the configured token budget.` });
       }
     }
+    // The model reads `text`. Everything else on this object is for
+    // programmatic callers, so a provider that timed out or reported itself
+    // unavailable was invisible to the one reader whose behaviour depends on
+    // it: the context looked complete, and the model would answer "you have no
+    // memories about that" when the truth was "memory could not be reached".
+    // A confident answer from silently missing context is worse than an error,
+    // because nothing about it invites a retry.
+    //
+    // Appended AFTER the token budget on purpose. It is one short line per
+    // failed provider, and trimming the notice that says the context is
+    // incomplete would be precisely the wrong thing to drop.
+    const body = retained.map(render).join('\n\n');
+    const text = gaps === undefined ? body : body === '' ? gaps : `${body}\n\n${gaps}`;
+
     return {
       profile: profileName,
-      text: retained.map(render).join('\n\n'),
+      text,
       sections: retained,
       warnings,
-      estimatedTokens: used,
+      estimatedTokens: estimateTokens(text),
       budgetTokens,
       timings,
       generatedAt: now(),

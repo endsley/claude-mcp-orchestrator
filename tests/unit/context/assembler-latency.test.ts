@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { estimateTokens } from '../../../src/context/text.js';
 import { ContextAssembler } from '../../../src/context/assembler.js';
 import type { ContextAssemblyConfiguration } from '../../../src/context/contracts.js';
 import { ContextProviderRegistry } from '../../../src/context/registry.js';
@@ -222,4 +223,123 @@ describe('capabilities() spends one timeout, not two', () => {
     expect(capabilities[0]?.health?.status).toBe('ok');
     expect(provider.healthChecks).toBe(1);
   });
+});
+
+/**
+ * A provider that fails is invisible to the reader whose behaviour depends on
+ * it.
+ *
+ * assemble() has always recorded warnings, but only on the returned object --
+ * and the model reads `text`. So a timed-out memory provider produced a
+ * context that LOOKED complete, and the model would answer "you have no
+ * memories about that" when the truth was "memory could not be reached". A
+ * confident answer from silently missing context is worse than an error,
+ * because nothing about it invites a retry.
+ *
+ * Found by asking what the system silently DROPS -- the same inversion that
+ * found seventeen false positives in the permission classifier and the
+ * over-redaction of credential metadata.
+ */
+class FailingProvider implements InitialContextProvider {
+  readonly defaultEnabled = true;
+  readonly priority = 50;
+  constructor(readonly id: string, readonly description: string, private readonly mode: 'timeout' | 'unavailable' | 'throws') {}
+  async isAvailable(): Promise<boolean> {
+    return this.mode !== 'unavailable';
+  }
+  async getContext(): Promise<InitialContextSection | null> {
+    if (this.mode === 'timeout') {
+      await sleep(5_000);
+      return null;
+    }
+    throw new Error('provider exploded');
+  }
+}
+
+describe('a gap in the context is stated in the context', () => {
+  function assembler(providers: InitialContextProvider[], ids: string[]): ContextAssembler {
+    const registry = new ContextProviderRegistry();
+    for (const provider of providers) registry.register(provider);
+    return new ContextAssembler(registry, configuration(ids, { defaultTimeoutMs: 150 }));
+  }
+
+  it('names a provider that timed out, in the text the model reads', async () => {
+    const good = new SlowProbeProvider('projects', 1, 1);
+    const assembled = await assembler([good, new FailingProvider('memory', 'long-term memory', 'timeout')], [
+      'projects',
+      'memory',
+    ]).assemble({});
+
+    expect(assembled.text).toContain('PROJECTS');
+    expect(assembled.text).toMatch(/CONTEXT GAPS/);
+    expect(assembled.text).toMatch(/long-term memory/);
+    // The structured warning is still there for programmatic callers.
+    expect(assembled.warnings.some((warning) => warning.providerId === 'memory')).toBe(true);
+  }, 20_000);
+
+  it('names one that reported itself unavailable, and one that threw', async () => {
+    const assembled = await assembler(
+      [
+        new SlowProbeProvider('projects', 1, 1),
+        new FailingProvider('computers', 'machine list', 'unavailable'),
+        new FailingProvider('systemStatus', 'system status', 'throws'),
+      ],
+      ['projects', 'computers', 'systemStatus'],
+    ).assemble({});
+
+    expect(assembled.text).toMatch(/machine list/);
+    expect(assembled.text).toMatch(/system status/);
+  }, 20_000);
+
+  it('says nothing at all when every provider answered', async () => {
+    // The notice must not become background noise, or it stops being read.
+    const assembled = await assembler([new SlowProbeProvider('projects', 1, 1)], ['projects']).assemble({});
+    expect(assembled.text).not.toMatch(/CONTEXT GAPS/);
+    expect(assembled.text).toBe('PROJECTS\nlate');
+  }, 20_000);
+
+  it('counts the notice in the reported token estimate', async () => {
+    // estimatedTokens is what a caller budgets against; reporting a number
+    // that excludes text we actually emit would make it a lie.
+    const assembled = await assembler([new FailingProvider('memory', 'long-term memory', 'timeout')], ['memory']).assemble({});
+    expect(assembled.estimatedTokens).toBe(estimateTokens(assembled.text));
+    expect(assembled.estimatedTokens).toBeGreaterThan(0);
+  }, 20_000);
+});
+
+describe('a trimmed section is not a gap', () => {
+  it('stays silent when a section was only shortened', async () => {
+    // Trimmed content is PRESENT, just shorter, and the model can see what it
+    // got. Calling that a gap would spend tokens telling it something it can
+    // already observe, and would make the notice routine enough to ignore --
+    // which is how a warning stops working.
+    class Chatty implements InitialContextProvider {
+      readonly id = 'projects';
+      readonly defaultEnabled = true;
+      readonly description = 'projects';
+      readonly priority = 90;
+      async isAvailable(): Promise<boolean> {
+        return true;
+      }
+      async getContext(): Promise<InitialContextSection> {
+        return {
+          providerId: this.id,
+          title: 'PROJECTS',
+          lines: Array.from({ length: 400 }, (_, index) => `project number ${index} with a long descriptive name`),
+          generatedAt: new Date().toISOString(),
+        };
+      }
+    }
+    const registry = new ContextProviderRegistry();
+    registry.register(new Chatty());
+    const assembled = await new ContextAssembler(
+      registry,
+      configuration(['projects'], { maxTokens: 120 }),
+    ).assemble({});
+
+    // It really was trimmed...
+    expect(assembled.warnings.some((warning) => warning.reason === 'trimmed')).toBe(true);
+    // ...and that is not reported as missing context.
+    expect(assembled.text).not.toMatch(/CONTEXT GAPS/);
+  }, 20_000);
 });
