@@ -201,6 +201,21 @@ export class WorkSessionStore {
     return rows.map(rowToSession);
   }
 
+  /**
+   * Every session in one status, unbounded and oldest first.
+   *
+   * Deliberately NOT `list({ status })`: that caps at 20 rows by default and
+   * orders by `updated_at DESC`, so a sweep built on it would examine only
+   * the most recently touched sessions and never reach the quiet tail - which
+   * is precisely the set a reaper exists to find.
+   */
+  listAllByStatus(status: WorkSessionStatus): WorkSession[] {
+    const rows = this.db
+      .prepare('SELECT * FROM work_sessions WHERE status = ? ORDER BY updated_at ASC')
+      .all(status) as WorkSessionRow[];
+    return rows.map(rowToSession);
+  }
+
   /** Sessions that the supervisor believes should have a live worker. */
   listResumable(): WorkSession[] {
     const rows = this.db

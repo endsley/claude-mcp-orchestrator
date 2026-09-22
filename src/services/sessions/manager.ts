@@ -680,7 +680,7 @@ export class SessionManager {
     this.store.appendProgress(sessionId, 'warning', `The ${kind} went unanswered, so work continued without it.`);
   }
 
-  private failSession(sessionId: string, error: unknown): void {
+  private failSession(sessionId: string, error: unknown, options: { fromWorker?: boolean } = {}): void {
     const session = this.store.get(sessionId);
     if (!session) return;
     if (isTerminalStatus(session.status)) return;
@@ -692,7 +692,7 @@ export class SessionManager {
     this.store.setStatus(sessionId, 'failed', {
       summary: `Work failed: ${orchestratorErr.message}`,
       step: null,
-      error: { code: orchestratorErr.code, message: orchestratorErr.message, fromWorker: true },
+      error: { code: orchestratorErr.code, message: orchestratorErr.message, fromWorker: options.fromWorker ?? true },
     });
     this.store.appendProgress(sessionId, 'error', `Failed: ${orchestratorErr.message}`);
 
@@ -762,18 +762,21 @@ export class SessionManager {
     // pins that project forever. A session already past its total wall-clock
     // cap cannot legitimately resume, so the same cap retires it - rather
     // than inventing a second, separate staleness policy for interrupted.
-    const candidates = [...this.store.listResumable(), ...this.store.list({ status: 'interrupted' })];
+    const candidates = [...this.store.listResumable(), ...this.store.listAllByStatus('interrupted')];
     for (const session of candidates) {
       const startedAt = Date.parse(session.startedAt ?? session.createdAt);
       // An unparseable timestamp is not a reason to kill someone's work.
       if (!Number.isFinite(startedAt)) continue;
       if (nowMs - startedAt <= cap) continue;
+      // Its own code, and NOT attributed to the worker: nothing the worker
+      // did caused this, and SESSION_ALREADY_FINISHED means something else.
       this.failSession(
         session.id,
         orchestratorError(
-          'SESSION_ALREADY_FINISHED',
+          'SESSION_TIMED_OUT',
           `work session exceeded its ${Math.round(cap / 60_000)} minute wall-clock cap and was ended`,
         ),
+        { fromWorker: false },
       );
       reaped.push(session.id);
     }

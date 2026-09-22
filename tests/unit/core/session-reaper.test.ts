@@ -176,6 +176,36 @@ describe('session reaper', () => {
     expect(store.getProjectWriteLockHolder('project:demo')).toBeDefined();
   });
 
+  /**
+   * The sweep originally read interrupted sessions through list({ status }),
+   * which caps at 20 rows and orders by updated_at DESC. That examined only
+   * the most recently touched sessions and never reached the quiet tail -
+   * exactly the set a reaper exists to find.
+   */
+  it('reaps every stale interrupted session, not just the first twenty', () => {
+    const total = 25;
+    for (let index = 0; index < total; index += 1) {
+      const created = store.create({ mode: 'work', writeCapable: false, instruction: `job ${index}` });
+      store.setStatus(created.id, 'interrupted', { summary: 'server restarted' });
+    }
+    expect(store.listAllByStatus('interrupted')).toHaveLength(total);
+
+    const reaped = manager.reapExpiredSessions(Date.now() + 3 * HOUR);
+
+    expect(reaped).toHaveLength(total);
+    expect(store.listAllByStatus('interrupted')).toHaveLength(0);
+  });
+
+  it('records a timeout as its own cause, not as a worker failure', async () => {
+    const { sessionId } = await manager.startSession({ instruction: 'Fix the nav', project: 'demo' });
+    manager.reapExpiredSessions(Date.now() + 3 * HOUR);
+
+    const failed = store.getOrThrow(sessionId);
+    expect(failed.error?.code).toBe('SESSION_TIMED_OUT');
+    // The worker did not cause this, so it must not be blamed for it.
+    expect(failed.error?.fromWorker).toBe(false);
+  });
+
   it('startReaper is idempotent and stopReaper is safe to call twice', () => {
     manager.startReaper(60_000);
     manager.startReaper(60_000);
