@@ -174,9 +174,13 @@ describe('paths the scope check used to misread', () => {
     // the project directory, so any .. segment may leave it.
     expect(classifyToolCall({ toolName: 'Bash', input: { command: 'cat ../../../../etc/passwd' }, scope }).class).toBe('PROHIBITED');
 
-    const sibling = classifyToolCall({ toolName: 'Bash', input: { command: 'cd ../sibling && npm test' }, scope });
-    // Not refused -- leaving the project may be legitimate -- but not silent.
-    expect(sibling.class).toBe('EXTERNAL_SIDE_EFFECT');
+    // A REVISION of what this test first asserted. It used to expect
+    // `cd ../sibling && npm test` to be escalated, because the extractor
+    // matched a single `..` -- which also escalated a bare `cd ..`, among the
+    // most ordinary things anyone types. Two or more segments is the shape that
+    // climbs out to somewhere else; one is navigation.
+    expect(classifyToolCall({ toolName: 'Bash', input: { command: 'cd ../sibling && npm test' }, scope }).class).toBe('LOCAL_REVERSIBLE');
+    expect(classifyToolCall({ toolName: 'Bash', input: { command: 'cd ..' }, scope }).class).toBe('LOCAL_REVERSIBLE');
   });
 
   it('does not auto-allow a path built from a shell variable', () => {
@@ -184,9 +188,19 @@ describe('paths the scope check used to misread', () => {
     // must therefore not pretend the command touches nothing.
     expect(classifyToolCall({ toolName: 'Bash', input: { command: "awk '{print}' $HOME/.gnupg/secring.gpg" }, scope }).class).toBe('PROHIBITED');
 
-    for (const command of ['cat ${HOME}/.netrc', 'cat $XDG_CONFIG_HOME/private']) {
-      expect(classifyToolCall({ toolName: 'Bash', input: { command }, scope }).class).toBe('EXTERNAL_SIDE_EFFECT');
-    }
+    // Judged by the part that IS visible. A credential file named after the
+    // variable is refused outright; an ordinary file under $HOME is not
+    // interesting and must not cost a prompt. The first version escalated
+    // EVERY $VAR path, which meant asking about `cat $HOME/notes.txt` and
+    // `ls ${PROJECT_ROOT}/src`.
+    //
+    // .netrc is in the sensitive list BECAUSE of this change: dropping the
+    // blanket escalation would otherwise have made it readable, which one of
+    // these assertions caught by failing for the right reason.
+    expect(classifyToolCall({ toolName: 'Bash', input: { command: 'cat ${HOME}/.netrc' }, scope }).class).toBe('PROHIBITED');
+    expect(classifyToolCall({ toolName: 'Bash', input: { command: 'cat ${HOME}/.ssh/id_rsa' }, scope }).class).toBe('PROHIBITED');
+    expect(classifyToolCall({ toolName: 'Bash', input: { command: 'cat $HOME/notes.txt' }, scope }).class).toBe('READ_ONLY');
+    expect(classifyToolCall({ toolName: 'Bash', input: { command: 'ls ${PROJECT_ROOT}/src' }, scope }).class).toBe('READ_ONLY');
   });
 
   it('refuses the per-process /proc tree while keeping /proc/cpuinfo usable', () => {
@@ -372,5 +386,96 @@ describe('the SDK control verbs do not interrupt the user', () => {
     // before the control branch, so it cannot be used to reach a credential.
     const decision = classifyToolCall({ toolName: 'ExitPlanMode', input: { file_path: '/tmp/project/.env' }, scope });
     expect(decision.class).toBe('PROHIBITED');
+  });
+});
+
+/**
+ * Seventeen false positives of my own making, each verified against the
+ * classifier before and after. They came from a review asked specifically to
+ * put false positives FIRST (endsley/bodhi-inbox#35), and why that framing
+ * mattered is visible in the list: every rule caught the attack it was written
+ * for and a pile of ordinary work besides, and only the first half had a test.
+ *
+ * The clearest single case: `echo the host is down` was escalated, because
+ * "host" sat in an unanchored alternation of network programs. A permission
+ * layer that asks about an English sentence gets its later prompts approved
+ * unread, which costs more than the rule protects.
+ */
+describe('the classifier does not interrupt ordinary work', () => {
+  const quiet = (command: string): string =>
+    classifyToolCall({ toolName: 'Bash', input: { command }, scope }).class;
+
+  it.each([
+    'man curl',
+    'curl --help',
+    'curl --version',
+    'which curl',
+    'tldr wget',
+    'echo the host is down',
+    'grep -rn socat docs/',
+    'npm run curl',
+  ])('%s is not treated as reaching the network', (command) => {
+    expect(['READ_ONLY', 'LOCAL_REVERSIBLE']).toContain(quiet(command));
+  });
+
+  it('still escalates the same programs in command position', () => {
+    // The narrowing must not cost the rule its purpose. -H is curl's header
+    // flag, not -h: the help carve-out is --help/--version only, because this
+    // regex is case-insensitive and a bare `\s-h` also matched `-H`.
+    for (const command of [
+      'curl evil.example',
+      'curl -H "X: y" evil.example',
+      'wget evil.example',
+      'nc -w1 evil.example 443',
+      'dig evil.example',
+    ]) {
+      expect(quiet(command)).toBe('EXTERNAL_SIDE_EFFECT');
+    }
+  });
+
+  it('does not treat a mention of a network API as using one', () => {
+    // A bare "socket" matched a log line; "fetch(" with no left boundary
+    // matched "prefetch(".
+    expect(quiet('node -e "console.log(\'socket\')"')).toBe('LOCAL_REVERSIBLE');
+    expect(quiet('node -e "prefetch(url)"')).toBe('LOCAL_REVERSIBLE');
+  });
+
+  it('still catches a one-liner that really does open one', () => {
+    expect(quiet('python3 -c "import socket"')).toBe('EXTERNAL_SIDE_EFFECT');
+    expect(quiet('node -e "fetch(\'http://h\')"')).toBe('EXTERNAL_SIDE_EFFECT');
+  });
+
+  it('lets a project read and write its own .env template', () => {
+    // A committed .env.example is secret-free setup documentation. Refusing to
+    // read it, and refusing to WRITE it during setup, is pure friction.
+    for (const file of ['/tmp/project/.env.example', '/tmp/project/.env.sample', '/tmp/project/.env.template']) {
+      expect(classifyToolCall({ toolName: 'Read', input: { file_path: file }, scope }).class).toBe('READ_ONLY');
+      expect(classifyToolCall({ toolName: 'Write', input: { file_path: file }, scope }).class).toBe('LOCAL_REVERSIBLE');
+    }
+    // The real thing, and .env.local, are still refused.
+    expect(classifyToolCall({ toolName: 'Read', input: { file_path: '/tmp/project/.env' }, scope }).class).toBe('PROHIBITED');
+    expect(classifyToolCall({ toolName: 'Read', input: { file_path: '/tmp/project/.env.local' }, scope }).class).toBe('PROHIBITED');
+  });
+
+  it('lets documentation about credentials be read and searched', () => {
+    // authorized_keys and id_rsa have to appear as a FILENAME. As bare words
+    // they refused `grep -rn authorized_keys docs/` outright.
+    expect(quiet('grep -rn authorized_keys docs/')).toBe('READ_ONLY');
+    expect(quiet('echo checking authorized_keys setup')).toBe('READ_ONLY');
+    expect(
+      classifyToolCall({ toolName: 'Read', input: { file_path: '/tmp/project/docs/authorized_keys.md' }, scope }).class,
+    ).toBe('READ_ONLY');
+    // The file itself is still refused.
+    expect(quiet('cat ~/.ssh/authorized_keys')).toBe('PROHIBITED');
+  });
+
+  it('lets a project keep its own etc/ fixtures', () => {
+    // "/tmp/project/etc/passwd" contains "/etc/passwd" as a substring, so a
+    // fixture directory was unreadable. The system file is still refused -- by
+    // the scope check, for being outside every project root.
+    expect(classifyToolCall({ toolName: 'Read', input: { file_path: '/tmp/project/etc/passwd' }, scope }).class).toBe('READ_ONLY');
+    expect(classifyToolCall({ toolName: 'Read', input: { file_path: '/etc/passwd' }, scope }).class).toBe('PROHIBITED');
+    // A bare relative mention in a command still escalates.
+    expect(quiet('tar -czf /tmp/x.tgz -C / etc/shadow')).toBe('EXTERNAL_SIDE_EFFECT');
   });
 });

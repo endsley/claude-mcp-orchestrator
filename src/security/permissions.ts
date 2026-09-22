@@ -83,7 +83,10 @@ interface Rule {
 const BASH_RULES: Rule[] = [
   // ---- prohibited by default: security controls and secret exposure
   { re: /\bsudo\b|\bdoas\b|\bpkexec\b/, class: 'PROHIBITED', reason: 'privilege escalation' },
-  { re: /authorized_keys|\bssh-add\b|(^|\s)~?\/?\.ssh\//, class: 'PROHIBITED', reason: 'SSH credential modification' },
+  // authorized_keys has to appear as a PATH, not as a word: `grep -rn
+  // authorized_keys docs/` and `echo checking authorized_keys setup` were both
+  // refused outright, so documentation about SSH could not be read or searched.
+  { re: /[\w.~-]\/authorized_keys\b|^\s*authorized_keys\b|\bssh-add\b|(^|\s)~?\/?\.ssh\//, class: 'PROHIBITED', reason: 'SSH credential modification' },
   { re: /\b(printenv|env)\b(?!\s+[A-Z_]+=)\s*$|\bset\s*$|\bexport\s*-p\b/, class: 'PROHIBITED', reason: 'dumps the environment, which may contain secrets' },
   { re: /\bcat\b[^|;]*\.(pem|key|p12|pfx)\b|id_rsa|id_ed25519/, class: 'PROHIBITED', reason: 'reads a private key' },
   { re: /\b(iptables|ufw|firewall-cmd|setenforce)\b/, class: 'PROHIBITED', reason: 'firewall or security policy change' },
@@ -122,14 +125,29 @@ const BASH_RULES: Rule[] = [
   // between "a program whose PURPOSE is the network" and "a program that might
   // use it", and only the first can be recognised without running it.
   {
-    re: /(^|[\s;&|(])(curl|wget|httpie|nc|netcat|ncat|telnet|ftp|tftp|dig|nslookup|host|ping6?|traceroute|whois|socat)(\s|$)/i,
+    // Anchored to COMMAND position, and that anchoring is the whole rule.
+    // Matching the verb anywhere in the segment escalated `man curl`,
+    // `which curl`, `grep -rn socat docs/`, `npm run curl` and -- the one that
+    // settles the argument -- `echo the host is down`, because "host" is an
+    // English word. Seventeen false positives from one unanchored alternation.
+    // A segment already starts at its command, because splitShellSegments cuts
+    // on every operator, so the first token is the program being run.
+    //
+    // The help carve-out is --help and --version only. A bare -h cannot be in
+    // it: this regex is case-insensitive, so `\s-h` also matched curl's -H
+    // header flag and `curl -H "X: y" host` stopped being escalated. Adding a
+    // convenience to a rule is how a rule quietly stops working.
+    re: /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(curl|wget|httpie|nc|netcat|ncat|telnet|ftp|tftp|dig|nslookup|host|ping6?|traceroute|whois|socat)\b(?![^\n]*(?:--help|--version))/i,
     class: 'EXTERNAL_SIDE_EFFECT',
     reason: 'reaches the network, which can carry data out',
   },
   // An interpreter one-liner that names a network API. Only -c/-e one-liners:
   // running a project's own scripts is ordinary work and must stay quiet.
   {
-    re: /\b(python3?|node|ruby|perl|php)\b[^|;]*\s-(c|e)\b[^|;]*(urllib|requests|httpx|socket|http\.client|net\.|fetch\(|XMLHttpRequest|Net::HTTP|LWP)/i,
+    // The API names need boundaries. A bare `socket` matched
+    // `console.log('socket')`, and `fetch(` with no left boundary matched
+    // `prefetch(url)`.
+    re: /\b(python3?|node|ruby|perl|php)\b[^|;]*\s-(c|e)\b[^|;]*(urllib|requests|httpx|http\.client|import\s+socket|socket\.(socket|create_connection)|net\.(connect|createConnection)|\bfetch\(|XMLHttpRequest|Net::HTTP|LWP)/i,
     class: 'EXTERNAL_SIDE_EFFECT',
     reason: 'an inline script that opens a network connection',
   },
@@ -216,6 +234,15 @@ const BENIGN_PATH_PREFIXES = [
 ];
 
 /** Locations whose contents are credentials or system control surfaces. */
+/**
+ * System files worth noticing ANYWHERE in a command line, including as a bare
+ * relative argument. Kept separate from the per-path pattern because a project
+ * may legitimately contain its own etc/ fixtures, while no command has business
+ * naming the real ones. This is what still catches
+ * `tar -czf /tmp/x.tgz -C / etc/shadow`.
+ */
+const SENSITIVE_COMMAND_PATTERN = /(^|[\s/"'])etc\/(shadow|passwd|sudoers)\b/;
+
 const SENSITIVE_PATH_PATTERN =
   // /proc/<pid>/ is here rather than merely absent from BENIGN_PATH_PREFIXES
   // because the sensitive test runs FIRST, so it wins over the /proc/ prefix
@@ -223,7 +250,26 @@ const SENSITIVE_PATH_PATTERN =
   // environment -- every token this process holds -- and was classified
   // READ_ONLY and auto-allowed, while the explicit rule on `env` and `printenv`
   // called the same information PROHIBITED. Both cannot be right.
-  /(\/\.ssh\/|\/\.aws\/|\/\.gnupg\/|\/\.config\/gcloud|\/\.kube\/|authorized_keys|id_rsa|id_ed25519|(^|[\s/])etc\/(shadow|passwd|sudoers)|\/root\/|\/proc\/(self|thread-self|[0-9]+)\/|\.pem$|\.p12$|\.pfx$|(^|\/)\.env(\.|$))/;
+  // Three narrowings, each undoing a false positive of my own making:
+  //
+  //  - authorized_keys / id_rsa must be the FILENAME, so docs/authorized_keys.md
+  //    and notes about id_rsa stay readable.
+  //  - .env excludes the committed templates. `.env.example`, `.env.sample` and
+  //    `.env.template` are secret-free setup files that a project expects to be
+  //    read AND written; refusing them is pure friction. `.env.local` is a real
+  //    secret file and stays matched.
+  //  - .netrc and .pgpass are ADDED. Removing the blanket escalation of
+  //    $VAR paths would otherwise have made `cat ${HOME}/.netrc` readable --
+  //    a real gap, surfaced by one of my own tests failing for the right
+  //    reason rather than the one it was written for.
+  //  - etc/(shadow|passwd|sudoers) is ANCHORED to the filesystem root rather
+  //    than matched anywhere, because "/tmp/project/etc/passwd" contains
+  //    "/etc/passwd" as a substring and a project's own fixture directory was
+  //    unreadable. Removing it outright was the first attempt and was worse: an
+  //    existing test caught `cp /etc/shadow /tmp/x` dropping from PROHIBITED to
+  //    merely "ask", because the whole-command scan only escalates. The system
+  //    files live at the root, so that is where the pattern should look.
+  /(\/\.ssh\/|\/\.aws\/|\/\.gnupg\/|\/\.config\/gcloud|\/\.kube\/|(^|\/)authorized_keys$|(^|\/)id_rsa(\.pub)?$|(^|\/)id_ed25519(\.pub)?$|^\/etc\/(shadow|passwd|sudoers)$|\/root\/|\/proc\/(self|thread-self|[0-9]+)\/|\.pem$|\.p12$|\.pfx$|(^|\/)\.netrc$|(^|\/)\.pgpass$|(^|\/)\.env(?!\.(example|sample|template|dist)$)(\.|$))/;
 
 /**
  * Pull filesystem paths out of a shell command.
@@ -257,7 +303,12 @@ export function extractBashPaths(command: string): string[] {
  */
 export function extractBashRelativePaths(command: string): string[] {
   const paths: string[] = [];
-  const pattern = /(?:^|[\s"'=:(<>|])((?:\.\.\/)+[A-Za-z0-9._~\-/]*|\.\.)(?=$|[\s"';)&|])/g;
+  // One or more segments, but NOT a bare `..`. Requiring two was tempting and
+  // wrong: these paths are now only tested against the sensitive patterns, not
+  // escalated wholesale, so `../.ssh/id_rsa` and `../etc/shadow` must still be
+  // EXTRACTED to be recognised -- and both have a single segment. A bare `..`
+  // names no file, so extracting it achieved nothing and cost `cd ..` a prompt.
+  const pattern = /(?:^|[\s"'=:(<>|])((?:\.\.\/)+[A-Za-z0-9._~\-/]*)(?=$|[\s"';)&|])/g;
   for (const match of command.matchAll(pattern)) {
     const candidate = match[1];
     if (candidate !== undefined) paths.push(candidate);
@@ -314,14 +365,19 @@ function escalateForBashPaths(
   // Paths this classifier cannot resolve: relative ones (no cwd here) and ones
   // assembled from a shell variable (no environment here). Neither can be
   // scope-checked, so neither may be auto-allowed on the strength of the verb.
+  // These are checked for SENSITIVE targets only -- no blanket escalation.
+  //
+  // Escalating every unresolvable path asked the user about `cd ..`,
+  // `cat $HOME/notes.txt` and `ls ${PROJECT_ROOT}/src`, which are among the most
+  // ordinary things anyone types. The true positives that motivated the
+  // extractors survive without it, because both are sensitive by NAME:
+  // `$HOME/.gnupg/secring.gpg` matches /.gnupg/, and
+  // `../../../../etc/passwd` matches the command pattern. Catching the
+  // dangerous case did not require suspecting every variable.
   for (const rawPath of [...extractBashRelativePaths(command), ...extractBashUnresolvablePaths(command)]) {
-    if (SENSITIVE_PATH_PATTERN.test(rawPath)) {
+    if (SENSITIVE_PATH_PATTERN.test(rawPath) || SENSITIVE_COMMAND_PATTERN.test(rawPath)) {
       return { class: 'PROHIBITED', reason: `references a sensitive location (${rawPath})` };
     }
-    result = {
-      class: maxClass(result.class, 'EXTERNAL_SIDE_EFFECT'),
-      reason: `references a path this system cannot resolve, so its scope cannot be checked (${rawPath})`,
-    };
   }
 
   // Last resort: a sensitive location named anywhere in the command line, even
@@ -333,7 +389,7 @@ function escalateForBashPaths(
   // an honest mention, such as `grep -rn authorized_keys docs/`. (A private key
   // named anywhere is already PROHIBITED outright by a rule above, so this
   // escalation never weakens that.)
-  if (SENSITIVE_PATH_PATTERN.test(command)) {
+  if (SENSITIVE_PATH_PATTERN.test(command) || SENSITIVE_COMMAND_PATTERN.test(command)) {
     result = {
       class: maxClass(result.class, 'EXTERNAL_SIDE_EFFECT'),
       reason: 'names a sensitive location somewhere in the command line',
