@@ -34,13 +34,21 @@ function oauthError(res: Response, status: number, error: string, description?: 
 }
 
 /**
- * Simple fixed-window throttle for the consent password.
+ * Simple fixed-window throttle.
  *
- * The consent screen is the one place a human secret is checked, which makes it
- * the one place worth brute forcing. Keyed by IP; state is in-memory on purpose
- * so a restart clears it.
+ * Used for the consent password, which is the one place a human secret is
+ * checked and therefore the one place worth brute forcing, and for dynamic
+ * client registration, which is unauthenticated by design.
+ *
+ * Keyed by IP, with an important caveat: this server listens on loopback
+ * behind a Cloudflare tunnel and does not set Express `trust proxy`, so every
+ * remote request presents the same loopback address. In that deployment the
+ * key is constant and the limit is effectively global rather than per-client.
+ * That is acceptable for a single-user server - a global cap still bounds the
+ * damage - and the moment a real client IP is forwarded the same code becomes
+ * per-IP with no change. State is in-memory on purpose so a restart clears it.
  */
-class LoginThrottle {
+class FixedWindowThrottle {
   private readonly attempts = new Map<string, { count: number; resetAt: number }>();
 
   constructor(
@@ -80,7 +88,15 @@ class LoginThrottle {
 export function createOAuthRouter(options: OAuthServerOptions): Router {
   const router = express.Router();
   const { store, logger } = options;
-  const throttle = new LoginThrottle();
+  const throttle = new FixedWindowThrottle();
+  // Registration creates a permanent row and is reachable by anyone who can
+  // reach the tunnel. Tokens expire; clients never do and are never pruned,
+  // so before this an unbounded caller could grow the database until the disk
+  // was gone. This bounds the RATE, not the total - a determined caller can
+  // still add rows slowly, and pruning clients that never completed an
+  // authorization is the remaining piece of work.
+  const registrationThrottle = new FixedWindowThrottle(30, 15 * 60_000);
+  const MAX_REDIRECT_URIS = 10;
   const resource = canonicalResource(options.resource);
 
   // Pending consents: maps an opaque request id to the validated authorization
@@ -145,8 +161,20 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
 
   // ------------------------------------------- RFC 7591 dynamic registration
   router.post('/oauth/register', express.json({ limit: '32kb' }), (req: Request, res: Response) => {
+    const throttleKey = req.ip ?? 'unknown';
+    if (!registrationThrottle.check(throttleKey)) {
+      logger.warn('registration throttled', { ip: throttleKey });
+      oauthError(res, 429, 'too_many_requests', 'Too many client registrations. Try again later.');
+      return;
+    }
+    registrationThrottle.record(throttleKey);
+
     const body = (req.body ?? {}) as Record<string, unknown>;
     const redirectUris = Array.isArray(body['redirect_uris']) ? (body['redirect_uris'] as unknown[]) : [];
+    if (redirectUris.length > MAX_REDIRECT_URIS) {
+      oauthError(res, 400, 'invalid_redirect_uri', `at most ${MAX_REDIRECT_URIS} redirect_uris are allowed`);
+      return;
+    }
 
     const uris: string[] = [];
     for (const candidate of redirectUris) {
