@@ -1,9 +1,10 @@
 import type { JsonValue } from '../types/json.js';
-import type { ActiveContextSnapshot, AssembledContext, ContextCapability, ContextAssemblyWarning, InitialContextProvider, InitialContextRequest, InitialContextSection } from '../types/context.js';
+import type { ActiveContextSnapshot, AssembledContext, ContextApplicability, ContextCapability, ContextAssemblyWarning, InitialContextProvider, InitialContextRequest, InitialContextSection } from '../types/context.js';
 
 export type {
   ActiveContextSnapshot,
   AssembledContext,
+  ContextApplicability,
   ContextCapability,
   ContextAssemblyWarning,
   InitialContextProvider,

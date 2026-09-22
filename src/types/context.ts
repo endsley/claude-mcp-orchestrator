@@ -74,6 +74,15 @@ export interface InitialContextSection {
  * The extension point. Adding a new category of initial context means writing
  * one of these and registering it — the assembler is never edited.
  */
+/**
+ * The part of a request a provider can inspect before any I/O happens, to say
+ * whether it could contribute at all.
+ */
+export interface ContextApplicability {
+  focus?: string;
+  options: Record<string, JsonValue>;
+}
+
 export interface InitialContextProvider {
   readonly id: string;
   /** One sentence, surfaced verbatim by list_context_capabilities. */
@@ -90,6 +99,14 @@ export interface InitialContextProvider {
    * rejection as unavailable.
    */
   isAvailable(): Promise<boolean>;
+
+  /**
+   * Synchronous, allocation-cheap check for whether this provider could say
+   * anything about THIS request. Returning false skips it before the
+   * availability probe, which for a remote dependency is a network round trip.
+   * Omit it and the provider always runs.
+   */
+  appliesTo?(request: ContextApplicability): boolean;
 
   /**
    * Produce this provider's section. Return null to contribute nothing for this

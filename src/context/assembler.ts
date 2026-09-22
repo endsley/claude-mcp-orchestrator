@@ -1,6 +1,7 @@
 import { orchestratorError } from '../types/errors.js';
 import type {
   AssembledContext,
+  ContextApplicability,
   ContextCapability,
   ContextAssemblyWarning,
   InitialContextProvider,
@@ -202,18 +203,35 @@ export class ContextAssembler {
       }
     }
 
+    const options: Record<string, JsonValue> = {
+      ...(setting?.options ?? {}),
+      projectId: input.projectId ?? null,
+      computerId: input.computerId ?? null,
+      workSessionId: input.workSessionId ?? null,
+    };
+
+    // Ask before paying. A provider that cannot answer this request should not
+    // cost an availability probe first, because for a remote dependency that
+    // probe is a network round trip spent to produce nothing.
+    const applicability: ContextApplicability = { options };
+    if (input.focus !== undefined) applicability.focus = input.focus;
+    if (provider.appliesTo?.(applicability) === false) {
+      return { providerId, section: null, priority: setting?.priority ?? provider.priority, elapsedMs: Math.round(performance.now() - started) };
+    }
+
+    // One budget for the whole provider, not one per call. isAvailable() and
+    // getContext() were each given the full timeoutMs, so a provider
+    // configured for 10s could hold the assembly for 20s - and the assembly
+    // only returns once every provider has settled.
+    const deadline = Date.now() + timeoutMs;
+    const remainingMs = (): number => Math.max(1, deadline - Date.now());
+
     try {
-      const available = (await timed(() => provider.isAvailable(), timeoutMs)).value;
+      const available = (await timed(() => provider.isAvailable(), remainingMs())).value;
       if (!available) {
         return { providerId, section: null, priority: setting?.priority ?? provider.priority, elapsedMs: Math.round(performance.now() - started), warning: { providerId, reason: 'unavailable', message: `${provider.description} is unavailable.` } };
       }
       const result = await timed((signal) => {
-          const options: Record<string, JsonValue> = {
-          ...(setting?.options ?? {}),
-          projectId: input.projectId ?? null,
-          computerId: input.computerId ?? null,
-          workSessionId: input.workSessionId ?? null,
-        };
         const request: InitialContextRequest = {
           profile,
           maxTokens,
@@ -224,7 +242,7 @@ export class ContextAssembler {
         };
         if (input.focus !== undefined) request.focus = input.focus;
         return provider.getContext(request);
-      }, timeoutMs);
+      }, remainingMs());
       const section = result.value;
       if (section !== null && (!section.title.trim() || section.lines.some((line) => typeof line !== 'string'))) {
         throw new Error('Provider returned malformed context.');

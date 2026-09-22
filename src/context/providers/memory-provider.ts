@@ -1,4 +1,4 @@
-import type { InitialContextProvider, InitialContextRequest, InitialContextSection, ProviderHealth } from '../contracts.js';
+import type { ContextApplicability, InitialContextProvider, InitialContextRequest, InitialContextSection, ProviderHealth } from '../contracts.js';
 import { trimToTokens } from '../text.js';
 import type { MemoryProvider } from '../../services/memory/types.js';
 
@@ -19,6 +19,14 @@ export class MemoryContextProvider implements InitialContextProvider {
     // Search remains uncached, so memory results never go stale/confusing.
     private readonly healthCacheTtlMs = 10_000,
   ) {}
+
+  /**
+   * Without a focus string getContext() returns null by design, so probing
+   * Mem0 for health first is pure latency on a live voice turn.
+   */
+  appliesTo(request: ContextApplicability): boolean {
+    return Boolean(request.focus?.trim());
+  }
 
   async isAvailable(): Promise<boolean> {
     return (await this.cachedHealth()).status !== 'unavailable';
