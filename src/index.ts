@@ -14,7 +14,7 @@ async function main(): Promise<void> {
   const { services } = app;
   const logger = services.logger.child({ component: 'main' });
 
-  const { app: expressApp, mcpHandler } = createHttpApp(services, {
+  const { app: expressApp, mcpHandler, stopPrune } = createHttpApp(services, {
     isReady: async () => {
       try {
         // Readiness means "can serve a request", which needs the database. A
@@ -58,6 +58,7 @@ async function main(): Promise<void> {
       timeout.unref();
 
       try {
+        stopPrune();
         await handle.close();
         await mcpHandler.close();
         await app.shutdown();

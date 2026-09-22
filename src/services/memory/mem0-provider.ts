@@ -158,6 +158,9 @@ export class Mem0HttpMemoryProvider implements MemoryProvider {
           const error = new Error(`Mem0 returned HTTP ${response.status}.`);
           if (response.status < 500) throw error;
           lastError = error;
+          // This path bypasses the catch below, so it needs the same check:
+          // once the caller has aborted, the backup base buys nothing.
+          if (externalSignal?.aborted === true) break;
           continue;
         }
         const content = await response.text();

@@ -58,6 +58,27 @@ describe('mem0 request waste', () => {
     expect(attempts).toBe(1);
   });
 
+  /**
+   * The 5xx branch returns rather than throwing, so it bypasses the catch and
+   * needed its own abort check. Without it, a primary that answers 503 after
+   * the caller gave up still triggered a backup round trip.
+   */
+  it('stops after an aborted caller even when the primary answers 5xx', async () => {
+    const controller = new AbortController();
+    let attempts = 0;
+    globalThis.fetch = vi.fn(async () => {
+      attempts += 1;
+      controller.abort();
+      return new Response('boom', { status: 503 });
+    }) as unknown as typeof fetch;
+
+    await expect(
+      provider('https://backup.invalid').search({ query: 'x', limit: 1, signal: controller.signal }),
+    ).rejects.toThrow();
+
+    expect(attempts).toBe(1);
+  });
+
   it('still fails over to the backup when the caller is still waiting', async () => {
     let attempts = 0;
     globalThis.fetch = vi.fn(async () => {
