@@ -190,7 +190,12 @@ export class ContextAssembler {
     // searches deliberately have no TTL configured, because serving a stale or
     // unrelated recollection is worse than paying for the lookup.
     const cacheTtlMs = setting?.cacheTtlMs ?? 0;
-    const cacheKey = cacheTtlMs > 0 ? `${providerId}|${profile}|${maxTokens}|${input.focus ?? ''}|${input.projectId ?? ''}|${input.computerId ?? ''}` : undefined;
+    // maxTokens is deliberately NOT part of the key. What gets cached is the
+    // provider's raw section; trimming to the budget happens later in
+    // assemble() via fitSection, so the cached value does not depend on the
+    // budget. Including it only fragmented the cache, making the same focus at
+    // a different budget re-run the provider for an identical result.
+    const cacheKey = cacheTtlMs > 0 ? `${providerId}|${profile}|${input.focus ?? ''}|${input.projectId ?? ''}|${input.computerId ?? ''}` : undefined;
     if (cacheKey !== undefined) {
       const hit = this.sectionCache.get(cacheKey);
       if (hit !== undefined && hit.expiresAt > Date.now()) {

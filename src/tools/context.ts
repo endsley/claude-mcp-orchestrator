@@ -59,10 +59,14 @@ export function registerContextTools(server: McpServer, services: Services): voi
         profile: assembled.profile,
         estimatedTokens: assembled.estimatedTokens,
         warnings: assembled.warnings as unknown as JsonValue,
+        // `lines` is deliberately omitted. assembled.text already renders
+        // every line, so repeating them here sent the whole payload twice on
+        // every voice turn - once as prose for the model to read and once as
+        // arrays it cannot use better. Section identity and any structured
+        // `data` are kept, which is what a programmatic caller actually needs.
         sections: assembled.sections.map((section) => ({
           providerId: section.providerId,
           title: section.title,
-          lines: section.lines,
           ...(section.data !== undefined ? { data: section.data } : {}),
         })),
       });
