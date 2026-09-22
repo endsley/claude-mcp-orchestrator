@@ -281,9 +281,16 @@ export class OAuthStore {
         scope: record.scope,
         ttlMs,
       });
-      this.db
-        .prepare('UPDATE oauth_tokens SET revoked_at = ?, rotated_to = ? WHERE token_hash = ?')
+      // Guarded and checked, matching consumeAuthorizationCode and revokeToken.
+      // The lookup above already rejects a revoked token, and better-sqlite3 is
+      // synchronous so two rotations cannot interleave today - but that is an
+      // assumption about the runtime, not about this code, and it is the kind
+      // that stops holding quietly. If the UPDATE ever matches nothing, the
+      // token was rotated out from under us and this caller must not win.
+      const revoked = this.db
+        .prepare('UPDATE oauth_tokens SET revoked_at = ?, rotated_to = ? WHERE token_hash = ? AND revoked_at IS NULL')
         .run(this.now(), hashSecret(next.token), hashSecret(oldToken));
+      if (revoked.changes === 0) return undefined;
       return { record, next };
     });
     return run();
