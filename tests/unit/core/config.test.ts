@@ -148,3 +148,53 @@ describe('parseEnvFile', () => {
     expect(parseEnvFile('9BAD=x\nGOOD=y')).toEqual({ GOOD: 'y' });
   });
 });
+
+/**
+ * isLoopbackHost gates the refusal to run `auth.mode: none` off-host, which
+ * schema.ts calls the single most important invariant in the file. It used to
+ * accept anything beginning with "127.", so a DNS name that merely looked
+ * like a loopback literal could switch that invariant off. The existing tests
+ * covered exact loopbacks and wildcards and nothing in between.
+ */
+describe('isLoopbackHost boundary', () => {
+  it.each(['127.0.0.1', '127.0.0.5', '127.1.2.3', 'localhost', '::1', '[::1]'])(
+    'treats %s as loopback',
+    (host) => {
+      expect(isLoopbackHost(host)).toBe(true);
+    },
+  );
+
+  it.each([
+    '127.0.0.1.evil.com',
+    '127.evil.com',
+    '127.0.0.1.nip.io',
+    'localhost.evil.com',
+  ])('does not treat the lookalike %s as loopback', (host) => {
+    // These are DNS names. They can resolve anywhere, including off-host.
+    expect(isLoopbackHost(host)).toBe(false);
+  });
+
+  it.each(['0.0.0.0', '::', '1.2.3.4', '10.0.0.1'])('does not treat %s as loopback', (host) => {
+    expect(isLoopbackHost(host)).toBe(false);
+  });
+
+  it.each(['127.1', '127.0.0', '127.0.0.256', '127.0.0.01', '127.0.0.-1', ''])(
+    'rejects the malformed %s rather than guessing',
+    (host) => {
+      expect(isLoopbackHost(host)).toBe(false);
+    },
+  );
+
+  it('still refuses auth.mode none on a loopback lookalike', () => {
+    // The invariant this function exists to protect.
+    expect(() =>
+      appConfigSchema.parse({ server: { host: '127.evil.com', auth: { mode: 'none' } } }),
+    ).toThrow(/not loopback/i);
+  });
+
+  it('still allows auth.mode none on a genuine loopback bind', () => {
+    expect(() =>
+      appConfigSchema.parse({ server: { host: '127.0.0.1', auth: { mode: 'none' } } }),
+    ).not.toThrow();
+  });
+});

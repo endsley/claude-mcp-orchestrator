@@ -387,9 +387,24 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]', '0:0:0
 /**
  * Whether a bind address is loopback-only. `0.0.0.0` and `::` are explicitly
  * NOT loopback: they are the classic way to accidentally publish a service.
+ *
+ * The 127/8 arm must check that the host IS AN IPv4 ADDRESS in that range, not
+ * merely that the string begins with "127.". A `startsWith('127.')` test
+ * accepts `127.evil.com` and `127.0.0.1.evil.com`, which are DNS names that
+ * can resolve anywhere at all. That matters more here than it looks: this
+ * function gates the refusal at the top of this file to run `auth.mode: none`
+ * off-host, so a host that merely LOOKS like a loopback literal could have
+ * disabled the one invariant the comment there calls the most important in
+ * the file.
  */
 export function isLoopbackHost(host: string): boolean {
   const normalised = host.trim().toLowerCase();
   if (LOOPBACK_HOSTS.has(normalised)) return true;
-  return normalised.startsWith('127.');
+  // Four dotted decimal octets, first one 127, each 0-255 and no leading
+  // zeros (so `127.1` and `127.0.0.01` are rejected rather than guessed at).
+  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(normalised);
+  if (octets === null) return false;
+  const values = octets.slice(1).map((part) => (/^0\d/.test(part) ? Number.NaN : Number(part)));
+  if (values.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) return false;
+  return values[0] === 127;
 }
