@@ -107,7 +107,9 @@ const VALUE_PATTERNS: Array<{ name: string; re: RegExp }> = [
   { name: 'slack-token', re: /\b(?:xox[abdeprs]-[A-Za-z0-9-]{10,}|xapp-[A-Za-z0-9-]{10,})/g },
   { name: 'google-key', re: /\bAIza[0-9A-Za-z_-]{30,}/g },
   { name: 'aws-access-key', re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
-  { name: 'jwt', re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
+  // Three segments is a JWS; a JWE has five. Matching only the first three left
+  // the ciphertext and the authentication tag in the log.
+  { name: 'jwt', re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)*/g },
   { name: 'tailscale-key', re: /\btskey-[A-Za-z0-9-]{10,}/g },
   { name: 'private-key-block', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
   // Credentials in a URL's userinfo. These reach logs constantly, because the
@@ -117,14 +119,25 @@ const VALUE_PATTERNS: Array<{ name: string; re: RegExp }> = [
   // -- which is why the quote is part of the prefix group. Without it the
   // pattern stopped at the `"` in {"authorization":"Bearer ..."} and matched
   // nothing, despite this comment having claimed JSON support all along.
-  { name: 'auth-header', re: /\b(authorization["']?\s*[:=]\s*["']?)(?:bearer\s+)?[A-Za-z0-9._~+/=-]{12,}/gi },
-  // KEY=value / "key": "value" where the key name looks sensitive. The decision
-  // is delegated to isSensitiveKey() rather than re-stated here: the two used to
-  // disagree, and the text path was the one missing the quantity-word guard, so
-  // `MAX_TOKENS=4000` was reported as `MAX_TOKENS=[redacted]`.
+  // Any auth scheme, not just Bearer. `Basic <base64(user:password)>` is a
+  // password in light disguise, and pinning the scheme to "bearer" meant the
+  // optional group failed, the {12,} body then had to match "Basic" itself, and
+  // the whole pattern missed -- leaking the credential in full.
+  { name: 'auth-header', re: /\b((?:proxy-)?authorization["']?\s*[:=]\s*["']?)(?:[A-Za-z]+\s+)?[A-Za-z0-9._~+/=-]{12,}/gi },
+  // KEY=value / "key": "value" for ANY key, with isSensitiveKey() -- not this
+  // regex -- deciding whether the value is a secret. The alternation this
+  // replaces was a third copy of the policy and had already drifted from the
+  // other two: ENCRYPTION_KEY, SIGNING_KEY and SESSION_COOKIE were all
+  // sensitive to isSensitiveKey and all invisible here. Any word added to
+  // SENSITIVE_WORDS now covers free text automatically.
   {
     name: 'sensitive-assignment',
-    re: /\b([A-Za-z0-9_]*(?:password|passwd|passphrase|secret|token|apikey|api[_-]?key|credential|private[_-]?key|access[_-]?key)[A-Za-z0-9_]*)(["']?\s*[:=]\s*["']?)([^\s,;}\]"']+)/gi,
+    // ? & # are excluded from the VALUE so a URL cannot be swallowed whole.
+    // Without that, "https://h/v1?access_token=x" matched key "https", value
+    // "//h/v1?access_token=x", came back not-sensitive, and consumed the real
+    // secret past it -- a broad pattern that eats text is worse than a narrow
+    // one that misses it.
+    re: /\b([A-Za-z][A-Za-z0-9_-]*)(["']?\s*[:=]\s*["']?)([^\s,;}\]"'?&#]+)/g,
   },
 ];
 
@@ -170,9 +183,12 @@ export function redactText(input: string): string {
     } else if (name === 'url-credentials') {
       out = out.replace(re, (_m, prefix: string) => `${prefix}:${REDACTED}@`);
     } else if (name === 'sensitive-assignment') {
-      out = out.replace(re, (match: string, key: string, sep: string) =>
-        assignmentIsSecret(key) ? `${key}${sep}${REDACTED}` : match,
-      );
+      out = out.replace(re, (match: string, key: string, sep: string, value: string) => {
+        // An earlier pattern may already have scrubbed this value; re-matching
+        // it re-emits the placeholder and strips its closing bracket.
+        if (value.startsWith('[redacted')) return match;
+        return assignmentIsSecret(key) ? `${key}${sep}${REDACTED}` : match;
+      });
     } else {
       out = out.replace(re, REDACTED);
     }
@@ -245,6 +261,30 @@ export function redactValue(value: unknown, depth = 0, seen = new WeakSet<object
       return value.map((item) => redactValue(item, depth + 1, seen));
     }
 
+    // Binary data must NEVER fall through to Object.entries. A Buffer holding a
+    // secret becomes {"0":115,"1":107,…} -- byte values that reconstruct the
+    // credential exactly, having never been near redactText. Report the shape
+    // and the size, which is all a log line can usefully say about bytes.
+    if (value instanceof ArrayBuffer) return `[ArrayBuffer ${value.byteLength} bytes]`;
+    if (ArrayBuffer.isView(value)) {
+      const kind = value.constructor?.name ?? 'TypedArray';
+      return `[${kind} ${value.byteLength} bytes]`;
+    }
+    // Map and Set have no own enumerable properties, so Object.entries returned
+    // "{}" and the contents vanished. That loses diagnostics rather than
+    // leaking, but a redactor that silently eats data gets worked around.
+    if (value instanceof Map) {
+      const out: Record<string, JsonValue> = {};
+      for (const [key, item] of value.entries()) {
+        const name = typeof key === 'string' ? key : String(key);
+        out[name] = isSensitiveKey(name) ? REDACTED : redactValue(item, depth + 1, seen);
+      }
+      return out;
+    }
+    if (value instanceof Set) {
+      return [...value.values()].map((item) => redactValue(item, depth + 1, seen));
+    }
+
     const out: Record<string, JsonValue> = {};
     for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
       out[key] = isSensitiveKey(key) ? REDACTED : redactValue(item, depth + 1, seen);
@@ -257,8 +297,13 @@ export function redactValue(value: unknown, depth = 0, seen = new WeakSet<object
 
 /**
  * Redact an environment-variable map. Unlike {@link redactValue} this keeps the
- * key names (they are useful in doctor output) but drops every suspicious
- * value, and never echoes a value merely because its name looked innocuous.
+ * key names but drops every suspicious value, and never echoes a value merely
+ * because its name looked innocuous.
+ *
+ * Nothing in src/ calls this yet -- the docstring used to claim it backed
+ * "doctor output", which does not exist. It is kept because the moment anything
+ * dumps the environment this is the only correct way to do it, and it is
+ * covered by tests so it cannot rot.
  */
 export function redactEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const out: Record<string, string> = {};

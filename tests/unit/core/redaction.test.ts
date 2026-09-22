@@ -257,3 +257,98 @@ describe('redactText leaves diagnostics readable', () => {
     expect(redactText(`HEAD is ${sha}`)).toBe(`HEAD is ${sha}`);
   });
 });
+
+/**
+ * Round two, from an adversarial review that ran against the previous commit
+ * (endsley/bodhi-inbox#28). Of nine claimed pattern gaps, three were already
+ * fixed, three were not real formats, and three were. The three real ones plus
+ * two the review found that the pattern probe had not are pinned here.
+ */
+describe('redactText round two', () => {
+  it('redacts any auth scheme, not just Bearer', () => {
+    // Basic is a password in base64. Pinning the scheme to "bearer" made the
+    // optional group fail, the 12-char body then had to match "Basic" itself,
+    // and the whole pattern missed.
+    expect(redactText('Authorization: Basic dXNlcjpwYXNzd29yZA==')).toBe('Authorization: [redacted]');
+    expect(redactText(`Proxy-Authorization: Bearer ${'k'.repeat(40)}`)).toBe('Proxy-Authorization: [redacted]');
+    expect(redactText(`authorization: Token ${'k'.repeat(40)}`)).toContain('[redacted]');
+  });
+
+  it('redacts all five segments of a JWE, not the first three', () => {
+    const jwe = 'eyJhbGciOiJkaXIifQ.eyJzdWIiOiIxIn0.FAKEctFAKEct.FAKEivFAKEiv.FAKEtagFAKEtag';
+    // Stopping at three left the ciphertext and the authentication tag behind.
+    expect(redactText(jwe)).toBe('[redacted]');
+  });
+
+  it('redacts any key isSensitiveKey considers sensitive, not a hand-listed few', () => {
+    // These three were sensitive to the object path and invisible to the text
+    // path, because the text path restated the policy as a regex alternation.
+    for (const key of ['ENCRYPTION_KEY', 'SIGNING_KEY', 'SESSION_COOKIE', 'SSH_PRIVATE_KEY']) {
+      expect(isSensitiveKey(key)).toBe(true);
+      expect(redactText(`${key}=FAKE1234567890abcdef`)).toBe(`${key}=[redacted]`);
+    }
+  });
+
+  it('finds a secret in a URL query without swallowing the URL', () => {
+    // The broad key pattern first matched key "https", value
+    // "//host/v1?access_token=…", found it not sensitive and consumed the real
+    // secret past it. A pattern that eats text is worse than one that misses.
+    const out = redactText(`GET https://api.example/v1?access_token=${'p'.repeat(40)} 200`);
+    expect(out).not.toContain('p'.repeat(40));
+    expect(out).toContain('https://api.example/v1?access_token=');
+    expect(out).toContain('200');
+
+    const two = redactText(`https://h/v1?api_key=${'q'.repeat(30)}&page=2`);
+    expect(two).not.toContain('q'.repeat(30));
+    // The non-secret parameter after it survives.
+    expect(two).toContain('page=2');
+  });
+
+  it('does not corrupt a value another pattern already redacted', () => {
+    // Proxy-Authorization is redacted by the auth-header pattern, then matches
+    // the assignment pattern as key "Proxy-Authorization" with value
+    // "[redacted" -- re-emitting the placeholder and dropping its bracket.
+    expect(redactText(`Proxy-Authorization: Bearer ${'k'.repeat(40)}`)).not.toContain('[redacted]]');
+  });
+
+  it('leaves an ordinary structured log line completely alone', () => {
+    // The counterweight to a broad key pattern: every pair here pays an
+    // isSensitiveKey() call and every one must come back false.
+    const line = 'component=main level=30 elapsedMs=12 route=/mcp status=200 host=katie';
+    expect(redactText(line)).toBe(line);
+  });
+});
+
+describe('redactValue handles objects that are not plain objects', () => {
+  it('never byte-dumps binary data', () => {
+    // A Buffer fell through to Object.entries and became {"0":115,"1":107,…},
+    // which reconstructs the credential exactly and never went near
+    // redactText. Verified by round-tripping the bytes.
+    const secret = 'sk-ant-api03-SUPERSECRETVALUE';
+    const out = redactValue({ keyBytes: Buffer.from(secret) }) as Record<string, unknown>;
+    expect(out['keyBytes']).toBe(`[Buffer ${Buffer.byteLength(secret)} bytes]`);
+
+    const serialised = JSON.stringify(out);
+    expect(serialised).not.toContain('115');
+    expect(serialised).not.toContain(secret);
+  });
+
+  it('describes typed arrays and ArrayBuffers by shape and size', () => {
+    const out = redactValue({ a: new Uint8Array([115, 107, 45]), b: new ArrayBuffer(8) }) as Record<string, unknown>;
+    expect(out['a']).toBe('[Uint8Array 3 bytes]');
+    expect(out['b']).toBe('[ArrayBuffer 8 bytes]');
+  });
+
+  it('keeps Map and Set contents instead of silently emptying them', () => {
+    // Neither has own enumerable properties, so Object.entries returned {} and
+    // the contents vanished. Losing diagnostics is not a leak, but a redactor
+    // that eats data gets routed around.
+    const out = redactValue({
+      m: new Map<string, unknown>([['api_key', 'sk-ant-secret'], ['retries', 5]]),
+      s: new Set(['plain', `sk-ant-api03-${'z'.repeat(30)}`]),
+    }) as Record<string, Record<string, unknown> | unknown[]>;
+
+    expect(out['m']).toEqual({ api_key: '[redacted]', retries: 5 });
+    expect(out['s']).toEqual(['plain', '[redacted]']);
+  });
+});

@@ -1,6 +1,6 @@
 import { buildApplication } from './app.js';
 import { createHttpApp, startHttpServer } from './server/http.js';
-import { OrchestratorError } from './types/errors.js';
+import { formatStartupFailure } from './logging/startup.js';
 
 /**
  * Service entrypoint.
@@ -86,10 +86,7 @@ async function main(): Promise<void> {
 
 main().catch((error: unknown) => {
   // The logger may not exist yet, so this one path writes to stderr directly.
-  if (OrchestratorError.is(error)) {
-    process.stderr.write(`startup failed [${error.code}]: ${error.message}\n`);
-  } else {
-    process.stderr.write(`startup failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
-  }
+  // See src/logging/startup.ts for why the formatting lives there.
+  process.stderr.write(`${formatStartupFailure(error)}\n`);
   process.exit(1);
 });
