@@ -81,15 +81,44 @@ function expandHome(candidate: string): string | null {
   return candidate;
 }
 
+/**
+ * The canonical form of a configured location.
+ *
+ * Falls back to a lexical resolve when the path does not exist yet: a project
+ * root can legitimately be created after the server starts, and refusing to
+ * construct the scope over it would be worse than comparing lexically until it
+ * appears.
+ */
+function canonicalise(path: string): string {
+  const absolute = resolve(path);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
 export class FilesystemScope {
   private readonly projectRoots: string[];
   private readonly readablePaths: string[];
   private readonly deniedPaths: string[];
 
   constructor(private readonly config: FilesystemScopeConfig) {
-    this.projectRoots = config.projectRoots.map((p) => resolve(p));
-    this.readablePaths = config.additionalReadablePaths.map((p) => resolve(p));
-    this.deniedPaths = config.deniedPaths.map((p) => resolve(p));
+    // Configured locations are CANONICALISED, not merely resolved.
+    //
+    // check() realpaths every candidate, so a root that is itself a symlink
+    // was being compared against canonical paths it could never contain: every
+    // single file in that project failed containment and was refused as "path
+    // resolves outside the project through a symlink" -- accusing the user of
+    // an escape that was not happening, and making the project unusable by
+    // either name. That is not exotic: /tmp is /private/tmp on macOS, and a
+    // symlinked ~/work or a checkout under a linked directory does it too.
+    //
+    // This does not weaken the escape check. A symlink INSIDE the project
+    // pointing out still lands outside the canonical root and is still caught.
+    this.projectRoots = config.projectRoots.map(canonicalise);
+    this.readablePaths = config.additionalReadablePaths.map(canonicalise);
+    this.deniedPaths = config.deniedPaths.map(canonicalise);
   }
 
   /**
@@ -116,10 +145,25 @@ export class FilesystemScope {
       }
     }
 
-    // Both the literal and the symlink-resolved path must sit inside the root,
-    // so a symlink cannot be used to smuggle access out of the project.
-    const inRoot = this.projectRoots.find((root) => isWithin(root, lexical) && isWithin(root, real));
+    // Containment is decided by where the path RESOLVES, because that is the
+    // file being opened. Requiring the literal path to be inside the root as
+    // well looks stricter and is not: the case it was there to catch --
+    // lexically inside, really outside -- already fails this test, and is
+    // still reported as an escape below. What it actually excluded was a file
+    // genuinely inside the project that happened to be NAMED through a
+    // symlink, which is every path in a project whose root is itself a link.
+    const inRoot = this.projectRoots.find((root) => isWithin(root, real));
     if (inRoot) return { allowed: true, root: inRoot, resolvedPath: real };
+
+    // An explicitly allowlisted destination is sanctioned however it is
+    // reached. This is checked BEFORE the escape branch because a link inside
+    // the project pointing at a directory the operator listed as readable was
+    // being refused, while the very same file named directly was allowed --
+    // the same target, opposite answers, decided by which name was used.
+    if (access === 'read') {
+      const sanctioned = this.readablePaths.find((p) => isWithin(p, real));
+      if (sanctioned) return { allowed: true, root: sanctioned, resolvedPath: real };
+    }
 
     const escapesViaSymlink = this.projectRoots.some((root) => isWithin(root, lexical) && !isWithin(root, real));
     if (escapesViaSymlink) {

@@ -151,3 +151,129 @@ describe('denied locations cannot be reached through a symlink', () => {
     expect(symScope.check(join(symProject, 'ok.ts'), 'read').allowed).toBe(true);
   });
 });
+
+/**
+ * A project root that is itself a symlink.
+ *
+ * check() canonicalises every candidate, so a root left un-canonicalised could
+ * never contain any of them: EVERY file in the project was refused, with a
+ * message accusing the user of escaping through a symlink. Not exotic -- /tmp
+ * is /private/tmp on macOS, and a symlinked ~/work or a checkout under a
+ * linked directory does the same thing. The project was unusable under either
+ * name, since the real path was then "outside every configured project root".
+ *
+ * Found by asking what the system wrongly REFUSES (endsley/bodhi-inbox#37),
+ * the third time that inversion has paid on this repo.
+ */
+describe('a project root reached through a symlink', () => {
+  let base: string;
+  let realRoot: string;
+  let linkedRoot: string;
+  let outside: string;
+  let shared: string;
+  let denied: string;
+  let scope: FilesystemScope;
+
+  beforeAll(() => {
+    base = mkdtempSync(join(tmpdir(), 'symlinked-root-'));
+    realRoot = join(base, 'real-project');
+    mkdirSync(join(realRoot, 'src'), { recursive: true });
+    writeFileSync(join(realRoot, 'src', 'a.ts'), 'export {};');
+
+    linkedRoot = join(base, 'linked-project');
+    symlinkSync(realRoot, linkedRoot);
+
+    outside = join(base, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'secret.txt'), 'secret');
+    symlinkSync(outside, join(realRoot, 'escape'));
+
+    denied = join(realRoot, 'private');
+    mkdirSync(denied, { recursive: true });
+    writeFileSync(join(denied, 'k.pem'), 'key');
+    symlinkSync(denied, join(realRoot, 'shortcut'));
+
+    shared = join(base, 'shared-docs');
+    mkdirSync(shared, { recursive: true });
+    writeFileSync(join(shared, 'guide.md'), '# guide');
+    symlinkSync(shared, join(realRoot, 'docs'));
+
+    // The root is configured BY ITS LINK, which is the whole point.
+    scope = new FilesystemScope({
+      projectRoots: [linkedRoot],
+      additionalReadablePaths: [shared],
+      deniedPaths: [denied],
+      allowOutsideProjectRead: false,
+      allowOutsideProjectWrite: false,
+    });
+  });
+
+  it('allows the project files by the linked name', () => {
+    expect(scope.check(join(linkedRoot, 'src', 'a.ts'), 'read').allowed).toBe(true);
+    expect(scope.check(join(linkedRoot, 'src', 'b.ts'), 'write').allowed).toBe(true);
+  });
+
+  it('allows the same files by their real name', () => {
+    // Refusing this was the second half of the bug: unusable either way.
+    expect(scope.check(join(realRoot, 'src', 'a.ts'), 'read').allowed).toBe(true);
+  });
+
+  it('allows an explicitly readable target however it is reached', () => {
+    // The same file, opposite answers, decided by which name was used: through
+    // the in-project link it was refused, named directly it was allowed.
+    expect(scope.check(join(realRoot, 'docs', 'guide.md'), 'read').allowed).toBe(true);
+    expect(scope.check(join(shared, 'guide.md'), 'read').allowed).toBe(true);
+  });
+
+  it('still refuses a symlink that leaves the project', () => {
+    const decision = scope.check(join(realRoot, 'escape', 'secret.txt'), 'read');
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toMatch(/symlink/i);
+  });
+
+  it('still refuses the denied directory, by either name', () => {
+    expect(scope.check(join(denied, 'k.pem'), 'read').allowed).toBe(false);
+    expect(scope.check(join(realRoot, 'shortcut', 'k.pem'), 'read').allowed).toBe(false);
+  });
+
+  it('still refuses writes to a read-only allowlisted path', () => {
+    // Readable is not writable, and the new ordering must not blur that.
+    expect(scope.check(join(shared, 'guide.md'), 'write').allowed).toBe(false);
+  });
+
+  it('still refuses somewhere outside everything', () => {
+    expect(scope.check(join(outside, 'secret.txt'), 'read').allowed).toBe(false);
+    expect(scope.check(join(realRoot, '..', 'outside', 'secret.txt'), 'read').allowed).toBe(false);
+  });
+});
+
+describe('the deny list is checked on both the literal and the resolved path', () => {
+  it('refuses a link INSIDE a denied directory that points outside it', () => {
+    // The two arms catch opposite tricks. The resolved arm stops a link
+    // elsewhere pointing INTO the denied directory; this one stops a link
+    // inside it pointing OUT, which would otherwise be an allowed read of
+    // something the operator placed off limits. Found by mutation: removing
+    // the literal arm passed every existing test.
+    const base = mkdtempSync(join(tmpdir(), 'deny-both-arms-'));
+    const project = join(base, 'project');
+    const secrets = join(project, 'private');
+    mkdirSync(secrets, { recursive: true });
+    const elsewhere = join(base, 'elsewhere');
+    mkdirSync(elsewhere, { recursive: true });
+    writeFileSync(join(elsewhere, 'notes.txt'), 'notes');
+    // A link that lives in the denied directory and points out of it.
+    symlinkSync(join(elsewhere, 'notes.txt'), join(secrets, 'outward'));
+
+    const scope = new FilesystemScope({
+      projectRoots: [project],
+      additionalReadablePaths: [elsewhere],
+      deniedPaths: [secrets],
+      allowOutsideProjectRead: false,
+      allowOutsideProjectWrite: false,
+    });
+
+    const decision = scope.check(join(secrets, 'outward'), 'read');
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toMatch(/denied/i);
+  });
+});
