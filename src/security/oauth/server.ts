@@ -98,6 +98,37 @@ class FixedWindowThrottle {
  */
 export function createOAuthRouter(options: OAuthServerOptions): Router {
   const router = express.Router();
+
+  /**
+   * Every response from this router either IS a credential or is the page that
+   * collects one, so none of it may be cached, framed, or content-sniffed.
+   *
+   * Cache-Control: no-store is not a nicety, it is RFC 6749 section 5.1 --
+   * "the authorization server MUST include ... no-store in any response
+   * containing tokens, credentials, or other sensitive information". The token
+   * endpoint was sending access and refresh tokens with no cache directive at
+   * all, and Express was attaching an ETag to them.
+   *
+   * frame-ancestors and X-Frame-Options exist because the consent page is where
+   * a human types the admin password -- the one human secret in the system --
+   * and it could be framed by any origin. Exploiting that needs the victim to
+   * type the password inside an attacker's frame, which is why this is low
+   * severity rather than none, and why it is also two lines to close.
+   *
+   * Applied to the whole router rather than to the sensitive paths, including
+   * the public discovery documents. Those would be safe to cache, so this costs
+   * them a round trip per client -- worth it for a rule with no exceptions to
+   * get wrong as endpoints are added.
+   */
+  router.use((_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
+  });
   const { store, logger } = options;
   const throttle = new FixedWindowThrottle();
   // Registration creates a permanent row and is reachable by anyone who can

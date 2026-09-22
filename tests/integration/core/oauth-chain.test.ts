@@ -417,3 +417,66 @@ describe('the consent password cannot be guessed without limit', () => {
     expect(sawThrottled).toBe(true);
   }, 60_000);
 });
+
+/**
+ * Response headers on the authorization server.
+ *
+ * Two separate reasons, both about the response rather than the protocol:
+ * no-store is required by RFC 6749 section 5.1 for anything carrying a
+ * credential, and the token endpoint was sending access and refresh tokens with
+ * no cache directive at all (Express even attached an ETag). frame-ancestors
+ * exists because the consent page is where a human types the admin password and
+ * any origin could frame it.
+ */
+describe('the authorization server does not let credentials be cached or framed', () => {
+  it('sends no-store on a token response', async () => {
+    // The body of a successful call here contains an access token and a refresh
+    // token. A cache that keeps it keeps the credentials.
+    const res = await form('/oauth/token', {
+      grant_type: 'authorization_code',
+      code: 'definitely-not-a-real-code',
+      client_id: 'definitely-not-a-real-client',
+    });
+    await res.text();
+    expect(res.headers.get('cache-control')).toMatch(/no-store/i);
+  }, 30_000);
+
+  it('refuses to be framed, and says so twice for older browsers', async () => {
+    const reg = await fetch(`${base}/oauth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ client_name: 'Headers', redirect_uris: [REDIRECT_URI] }),
+    });
+    const { client_id: clientId } = (await reg.json()) as { client_id: string };
+    const { challenge } = pkce();
+    const page = await fetch(
+      `${base}/oauth/authorize?${new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: REDIRECT_URI,
+        response_type: 'code',
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        state: 'xyz',
+        resource: `${issuer}/mcp`,
+      })}`,
+    );
+    const html = await page.text();
+
+    // It really is the password page, so the headers matter.
+    expect(page.status).toBe(200);
+    expect(html).toContain('type="password"');
+
+    expect(page.headers.get('content-security-policy')).toMatch(/frame-ancestors 'none'/);
+    expect(page.headers.get('x-frame-options')).toMatch(/DENY/i);
+    expect(page.headers.get('x-content-type-options')).toMatch(/nosniff/i);
+    // The page embeds a single-use request_id; a cached copy is a stale one.
+    expect(page.headers.get('cache-control')).toMatch(/no-store/i);
+  }, 30_000);
+
+  it('applies the same rule to the discovery document, so no path is forgotten', async () => {
+    const res = await fetch(`${base}/.well-known/oauth-authorization-server`);
+    expect(res.status).toBe(200);
+    await res.json();
+    expect(res.headers.get('cache-control')).toMatch(/no-store/i);
+  }, 30_000);
+});
