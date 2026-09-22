@@ -31,6 +31,11 @@ export interface Application {
   loaded: LoadedConfig;
   db: Db;
   shutdown(): Promise<void>;
+  /**
+   * Prime caches that are expensive to fill and cheap to hold, once the server
+   * is already listening. Never throws; a cold cache is slow, not broken.
+   */
+  warmUp(): void;
 }
 
 /** A memory provider that reports unavailable, used when Mem0 is disabled. */
@@ -184,6 +189,42 @@ export async function buildApplication(options: BuildApplicationOptions = {}): P
     services,
     loaded,
     db,
+    /**
+     * Pay the project registry's cold scan BEFORE a user can ask for anything.
+     *
+     * Measured on this host, 28 projects across two roots: the first scan in a
+     * fresh process with a cold OS page cache takes 7.6 SECONDS -- readdir plus
+     * up to four git subprocesses per project, none of it in the dentry cache.
+     * A second scan is 284ms and a cached one is 1ms, which is why this looked
+     * cheap when measured on a warm box and is the reason the number has to be
+     * taken after a reboot or after memory pressure, not after a test run.
+     *
+     * Unwarmed, that cost landed on the user twice over. The projects context
+     * provider has a 2500ms timeout, so the first get_environment_context after
+     * a cold boot did not merely wait -- it TIMED OUT and silently dropped
+     * project context altogether, which is worse than slow because nothing
+     * says so. And start_work_session names a project through list(), which has
+     * no timeout, so it simply waited the full 7.6s.
+     *
+     * Fire-and-forget on purpose: the server is already listening, and a warm
+     * cache is an optimisation, not a precondition. A failure here must not
+     * stop startup, so it is logged and dropped. The computers service is
+     * already warmed as a side effect of resolveSelfComputerId during boot.
+     */
+    warmUp: (): void => {
+      const started = Date.now();
+      void projects
+        .list()
+        .then((found) => {
+          logger.info('project registry warmed', { projects: found.length, elapsedMs: Date.now() - started });
+        })
+        .catch((error: unknown) => {
+          logger.warn('project registry warm-up failed; the first request will pay for the scan', {
+            err: error,
+            elapsedMs: Date.now() - started,
+          });
+        });
+    },
     shutdown: async () => {
       await sessions.shutdown();
       db.close();

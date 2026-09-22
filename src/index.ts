@@ -36,6 +36,10 @@ async function main(): Promise<void> {
     logger,
   );
 
+  // After listening, never before: the scan must not delay the port opening,
+  // and its whole purpose is to run while nobody is waiting.
+  app.warmUp();
+
   logger.info('claude-mcp-orchestrator started', {
     endpoint: `http://${services.config.server.host}:${handle.port}${services.config.server.mcpPath}`,
     authMode: services.config.server.auth.mode,
