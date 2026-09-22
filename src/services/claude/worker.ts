@@ -1,3 +1,4 @@
+import { settledWithin } from './settled-within.js';
 import { createSdkMcpServer, query, tool, type Options, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { ClaudeWorkerConfig } from '../../config/schema.js';
@@ -82,6 +83,17 @@ type PolicyResolver = (permissionClass: PermissionClass) => PermissionAction;
  * knows what "it" is. Restarting the query per instruction would silently lose
  * that, which is the failure mode this class exists to prevent.
  */
+/**
+ * How long a graceful interrupt may take before the worker is aborted instead.
+ *
+ * Deliberately a constant and not a config setting: this commit's sibling
+ * deleted a config knob that nothing read, and a second knob nobody will ever
+ * tune is the same mistake. Five seconds is long enough for a normal tool call
+ * to hand back control and short enough that a human pressing Stop does not
+ * wonder whether it worked.
+ */
+const GRACEFUL_INTERRUPT_MS = 5_000;
+
 export class ClaudeWorker implements WorkerLike {
   private readonly inputQueue = new AsyncMessageQueue<SDKUserMessage>();
   private readonly abortController = new AbortController();
@@ -172,15 +184,26 @@ export class ClaudeWorker implements WorkerLike {
    */
   async interrupt(): Promise<void> {
     if (!this.query) return;
-    try {
-      await this.query.interrupt();
-    } catch (error) {
+    let failed = false;
+    const attempt = this.query.interrupt().catch((error: unknown) => {
+      failed = true;
       this.logger.warn('graceful interrupt failed; falling back to abort', {
         workSessionId: this.workSessionId,
         err: error,
       });
-      this.abortController.abort();
+    });
+
+    // Bounded, because graceful is not a stop if it can wait forever. The SDK
+    // interrupt lets the model finish its current tool call; a tool call that
+    // never returns made the user's Stop never return either.
+    const returned = await settledWithin(attempt, GRACEFUL_INTERRUPT_MS);
+    if (!returned) {
+      this.logger.warn('graceful interrupt did not return in time; aborting', {
+        workSessionId: this.workSessionId,
+        timeoutMs: GRACEFUL_INTERRUPT_MS,
+      });
     }
+    if (failed || !returned) this.abortController.abort();
   }
 
   /** Terminate the worker and release its resources. */

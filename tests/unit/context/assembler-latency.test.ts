@@ -135,3 +135,91 @@ describe('assembler latency budget', () => {
     expect(result.text).toContain('late');
   });
 });
+
+/**
+ * A provider that is slow to probe AND slow to report health -- the shape
+ * list_context_capabilities hits. The memory provider is the real one: its
+ * health() is a live /search whose results are discarded.
+ */
+class SlowHealthProvider implements InitialContextProvider {
+  readonly defaultEnabled = true;
+  readonly description = 'slow health';
+  readonly priority = 1;
+  probes = 0;
+  healthChecks = 0;
+  constructor(
+    readonly id: string,
+    private readonly probeMs: number,
+    private readonly healthMs: number,
+    private readonly availableResult = true,
+  ) {}
+  async isAvailable(): Promise<boolean> {
+    this.probes += 1;
+    await sleep(this.probeMs);
+    return this.availableResult;
+  }
+  async getContext(): Promise<InitialContextSection | null> {
+    return section(this.id, 'x');
+  }
+  async health(): Promise<{ status: 'ok'; checkedAt: string }> {
+    this.healthChecks += 1;
+    await sleep(this.healthMs);
+    return { status: 'ok', checkedAt: new Date().toISOString() };
+  }
+}
+
+describe('capabilities() spends one timeout, not two', () => {
+  it('shares a single deadline between the probe and the health check', async () => {
+    // Pre-fix: isAvailable got the full 150ms and then health got the full
+    // 150ms again, sequentially -- 300ms for a call configured to take 150.
+    const provider = new SlowHealthProvider('slow', 100, 400);
+    const registry = new ContextProviderRegistry();
+    registry.register(provider);
+    const assembler = new ContextAssembler(registry, configuration(['slow'], { defaultTimeoutMs: 150 }));
+
+    const started = Date.now();
+    const capabilities = await assembler.capabilities();
+    const elapsed = Date.now() - started;
+
+    expect(capabilities).toHaveLength(1);
+    // The probe used 100 of the 150, so health may only have the remaining 50:
+    // about 150ms in total. Unfixed it is 100 + a fresh 150 = about 250ms, so
+    // the bound has to sit BELOW 250 or the test passes either way. It did not,
+    // at first -- 260 was above the broken cost and the mutation sweep proved
+    // the test worthless.
+    expect(elapsed).toBeLessThan(200);
+    expect(capabilities[0]?.health?.status).toBe('unavailable');
+  });
+
+  it('does not probe health for a provider that just said it is unavailable', async () => {
+    // Asking twice costs a second round trip to learn what the first one said.
+    const provider = new SlowHealthProvider('down', 10, 5_000, false);
+    const registry = new ContextProviderRegistry();
+    registry.register(provider);
+    const assembler = new ContextAssembler(registry, configuration(['down'], { defaultTimeoutMs: 2_000 }));
+
+    const started = Date.now();
+    const capabilities = await assembler.capabilities();
+
+    expect(Date.now() - started).toBeLessThan(400);
+    expect(provider.probes).toBe(1);
+    expect(provider.healthChecks).toBe(0);
+    expect(capabilities[0]?.available).toBe(false);
+    expect(capabilities[0]?.health?.status).toBe('unavailable');
+    expect(capabilities[0]?.health?.detail).toMatch(/not probed/i);
+  });
+
+  it('still reports a healthy provider as healthy', async () => {
+    // The counterweight: the bound must not turn a working provider into a
+    // failing one.
+    const provider = new SlowHealthProvider('fast', 5, 5);
+    const registry = new ContextProviderRegistry();
+    registry.register(provider);
+    const assembler = new ContextAssembler(registry, configuration(['fast'], { defaultTimeoutMs: 1_000 }));
+
+    const capabilities = await assembler.capabilities();
+    expect(capabilities[0]?.available).toBe(true);
+    expect(capabilities[0]?.health?.status).toBe('ok');
+    expect(provider.healthChecks).toBe(1);
+  });
+});

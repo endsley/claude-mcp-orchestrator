@@ -119,9 +119,16 @@ export class ContextAssembler {
     return this.runBounded(this.registry.list().map((provider) => async () => {
       const setting = this.configuration.providers[provider.id];
       const timeoutMs = setting?.timeoutMs ?? this.configuration.defaultTimeoutMs;
+      // ONE deadline for the probe and the health check together. fetch() was
+      // fixed this way; capabilities() was not, so it spent the full timeout on
+      // isAvailable() and then the full timeout again on health(), sequentially
+      // -- twice the configured bound for one call. The fix did not generalise
+      // because the budget was re-read per await rather than shared.
+      const deadline = Date.now() + timeoutMs;
+      const remainingMs = (): number => Math.max(1, deadline - Date.now());
       let available = false;
       try {
-        available = (await timed(() => provider.isAvailable(), timeoutMs)).value;
+        available = (await timed(() => provider.isAvailable(), remainingMs())).value;
       } catch {
         available = false;
       }
@@ -137,10 +144,22 @@ export class ContextAssembler {
           .map(([name]) => name),
       };
       if (provider.health !== undefined) {
-        try {
-          capability.health = (await timed(() => provider.health!(), timeoutMs)).value;
-        } catch {
-          capability.health = { status: 'unavailable', checkedAt: now(), detail: 'Health check timed out or failed.' };
+        if (!available) {
+          // Health was probed even for a provider that had just reported itself
+          // unavailable, which costs a second round trip to learn what the
+          // first one said. The memory provider's health() is a real /search
+          // whose results are discarded, so this was the expensive half.
+          capability.health = {
+            status: 'unavailable',
+            checkedAt: now(),
+            detail: 'Provider reported unavailable; health was not probed.',
+          };
+        } else {
+          try {
+            capability.health = (await timed(() => provider.health!(), remainingMs())).value;
+          } catch {
+            capability.health = { status: 'unavailable', checkedAt: now(), detail: 'Health check timed out or failed.' };
+          }
         }
       }
       return capability;
