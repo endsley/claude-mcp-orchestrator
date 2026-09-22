@@ -302,12 +302,20 @@ export class OAuthStore {
   }
 
   /** Housekeeping: drop expired codes and tokens. */
+  /**
+   * Delete everything that has expired.
+   *
+   * The token clause used to also require `revoked_at IS NOT NULL OR kind =
+   * 'access'`, which left one class behind forever: a refresh token that
+   * expired naturally without ever being rotated. That is one permanent row
+   * per authorization flow that never refreshed. An expired token cannot be
+   * used either way - lookupToken() rejects on expiry before looking at
+   * anything else - so keeping it bought nothing.
+   */
   pruneExpired(): { codes: number; tokens: number } {
     const now = this.now();
     const codes = this.db.prepare('DELETE FROM oauth_authorization_codes WHERE expires_at <= ?').run(now).changes;
-    const tokens = this.db
-      .prepare("DELETE FROM oauth_tokens WHERE expires_at <= ? AND (revoked_at IS NOT NULL OR kind = 'access')")
-      .run(now).changes;
+    const tokens = this.db.prepare('DELETE FROM oauth_tokens WHERE expires_at <= ?').run(now).changes;
     return { codes, tokens };
   }
 

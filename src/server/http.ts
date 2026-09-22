@@ -33,10 +33,14 @@ export interface ReadinessProbe {
  * diagnostics live in the doctor command, which runs locally, because a public
  * probe that lists your machines is an information leak.
  */
+/** How often expired OAuth codes and tokens are swept. */
+const OAUTH_PRUNE_INTERVAL_MS = 60 * 60_000;
+
 export function createHttpApp(
   services: Services,
   options: { isReady: ReadinessProbe; env?: NodeJS.ProcessEnv },
-): { app: Express; mcpHandler: McpHttpHandler } {
+): { app: Express; mcpHandler: McpHttpHandler; stopPrune: () => void } {
+  let pruneTimer: NodeJS.Timeout | undefined;
   const config: AppConfig = services.config;
   const logger: Logger = services.logger.child({ component: 'http' });
   const env = options.env ?? process.env;
@@ -177,7 +181,22 @@ export function createHttpApp(
         logger,
       }),
     );
-    store.pruneExpired();
+    // Sweep on a timer rather than only at boot. This process is meant to
+    // run for weeks, so a single startup prune let expired codes and tokens
+    // accumulate until the next restart. unref() so the sweep never holds the
+    // process - or a test - open, and the handle is returned for shutdown.
+    const runPrune = (): void => {
+      try {
+        const pruned = store.pruneExpired();
+        if (pruned.codes > 0 || pruned.tokens > 0) logger.info('oauth prune', pruned);
+      } catch (error) {
+        // A failed sweep must never take the server down with it.
+        logger.warn('oauth prune failed', { err: error });
+      }
+    };
+    runPrune();
+    pruneTimer = setInterval(runPrune, OAUTH_PRUNE_INTERVAL_MS);
+    pruneTimer.unref();
     logger.info('oauth authorization server mounted', { issuer, resource });
   }
 
@@ -286,7 +305,14 @@ export function createHttpApp(
     loopbackOnly,
   });
 
-  return { app, mcpHandler };
+  return {
+    app,
+    mcpHandler,
+    stopPrune: (): void => {
+      if (pruneTimer !== undefined) clearInterval(pruneTimer);
+      pruneTimer = undefined;
+    },
+  };
 }
 
 export async function startHttpServer(
