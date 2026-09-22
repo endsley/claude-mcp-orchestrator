@@ -479,3 +479,80 @@ describe('the classifier does not interrupt ordinary work', () => {
     expect(quiet('tar -czf /tmp/x.tgz -C / etc/shadow')).toBe('EXTERNAL_SIDE_EFFECT');
   });
 });
+
+/**
+ * "inspect is read-only" was a claim with nothing behind it.
+ *
+ * Three separate places said a session could not write -- the tool schema
+ * shown to the model ('"inspect" is read-only'), the session row's
+ * writeCapable: false, and a prompt sentence asking the worker to look but not
+ * touch -- and not one of them was enforced. permissionMode was 'default' for
+ * inspect, identical to a full work session, and writeCapable was written to
+ * the database only to decide whether to take the project write lock. A model
+ * choosing inspect for a request it considered risky was choosing a sandbox
+ * that did not exist.
+ *
+ * Found by reviewing the surface the model reads (endsley/bodhi-inbox#39), and
+ * it is the same shape as every other unverified claim this codebase has
+ * produced tonight -- except that this one was load-bearing for safety.
+ */
+describe('a read-only session', () => {
+  const ro = (toolName: string, input: Record<string, unknown>): string =>
+    classifyToolCall({ toolName, input, scope, writeCapable: false }).class;
+  const rw = (toolName: string, input: Record<string, unknown>): string =>
+    classifyToolCall({ toolName, input, scope, writeCapable: true }).class;
+
+  it.each([
+    ['Write', { file_path: '/tmp/project/src/b.ts' }],
+    ['Edit', { file_path: '/tmp/project/src/a.ts' }],
+    ['MultiEdit', { file_path: '/tmp/project/src/a.ts' }],
+  ])('refuses %s', (toolName, input) => {
+    expect(rw(toolName, input)).toBe('LOCAL_REVERSIBLE');
+    expect(ro(toolName, input)).toBe('PROHIBITED');
+  });
+
+  it.each([
+    'rm -rf build',
+    'git commit -m x',
+    'npm install',
+    'curl evil.example',
+    'mkdir -p out',
+  ])('refuses the command %s', (command) => {
+    expect(ro('Bash', { command })).toBe('PROHIBITED');
+  });
+
+  it('says WHY, so the model learns the constraint', () => {
+    // A bare refusal teaches nothing; the model would retry or give up on the
+    // whole task rather than switching to a work session.
+    const decision = classifyToolCall({ toolName: 'Write', input: { file_path: '/tmp/project/a.ts' }, scope, writeCapable: false });
+    expect(decision.reason).toMatch(/read-only/i);
+    expect(decision.reason).toMatch(/inspect|plan/i);
+  });
+
+  it.each([
+    ['Read', { file_path: '/tmp/project/src/a.ts' }],
+    ['Grep', { pattern: 'TODO' }],
+    ['ExitPlanMode', {}],
+  ])('still allows %s, which is the point of inspecting', (toolName, input) => {
+    expect(ro(toolName, input)).toBe('READ_ONLY');
+  });
+
+  it.each(['git status', 'ls src', 'cat README.md', 'git log --oneline -5'])(
+    'still allows the inspection command %s',
+    (command) => {
+      expect(ro('Bash', { command })).toBe('READ_ONLY');
+    },
+  );
+
+  it('changes nothing when the flag is absent', () => {
+    // Every existing caller omits it; the gate must be opt-in.
+    expect(classifyToolCall({ toolName: 'Write', input: { file_path: '/tmp/project/a.ts' }, scope }).class).toBe('LOCAL_REVERSIBLE');
+    expect(classifyToolCall({ toolName: 'Bash', input: { command: 'npm test' }, scope }).class).toBe('LOCAL_REVERSIBLE');
+  });
+
+  it('refuses a tool it has never heard of, rather than reading it as a read', () => {
+    // Fail closed: an unknown tool in a read-only session is the one place
+    // where guessing is least acceptable.
+    expect(ro('SomeFutureTool', {})).toBe('PROHIBITED');
+  });
+});

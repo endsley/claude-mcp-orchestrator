@@ -8,7 +8,7 @@ import type { FilesystemScope } from '../../security/paths.js';
 import { redactText } from '../../security/redaction.js';
 import { OrchestratorError, orchestratorError } from '../../types/errors.js';
 import type { PermissionAction, PermissionClass } from '../../types/permissions.js';
-import type { GitSummary, ProgressEventKind, TestSummary } from '../../types/sessions.js';
+import type { GitSummary, ProgressEventKind, TestSummary, WorkSessionMode } from '../../types/sessions.js';
 import { AsyncMessageQueue } from './asyncQueue.js';
 import { isTestCommand, parseExitCode, summariseTest } from './outcomes.js';
 
@@ -101,6 +101,8 @@ export class ClaudeWorker implements WorkerLike {
   private consumePromise?: Promise<void>;
   private disposed = false;
   private claudeSessionId?: string;
+  /** The mode this session was started in; 'work' is the only writable one. */
+  private mode: WorkSessionMode = 'work';
 
   /** tool_use_id -> what the tool was, so tool results can be interpreted. */
   private readonly inFlightTools = new Map<string, { name: string; input: Record<string, unknown> }>();
@@ -137,6 +139,8 @@ export class ClaudeWorker implements WorkerLike {
   start(options: WorkerStartOptions): void {
     if (this.query) throw orchestratorError('INTERNAL', 'worker already started');
 
+    this.mode = options.mode ?? 'work';
+
     const sdkOptions: Options = {
       cwd: options.cwd,
       abortController: this.abortController,
@@ -145,7 +149,12 @@ export class ClaudeWorker implements WorkerLike {
       // divergent source of truth.
       settingSources: this.config.settingSources,
       // Never bypassPermissions: canUseTool is the approval boundary.
-      permissionMode: options.mode === 'plan' ? 'plan' : 'default',
+      // 'inspect' joins 'plan' here. It was getting 'default' -- the same
+      // permission mode as a full work session -- so the only thing making an
+      // "read-only" session read-only was one sentence of prompt text asking
+      // the model nicely. The SDK's plan mode is the enforcement that sentence
+      // was standing in for; canUseTool below is the second line.
+      permissionMode: options.mode === 'work' ? 'default' : 'plan',
       canUseTool: (toolName, input, opts) => this.handleToolPermission(toolName, input, opts),
       maxTurns: this.config.maxTurns,
       includePartialMessages: false,
@@ -267,6 +276,11 @@ export class ClaudeWorker implements WorkerLike {
       toolName,
       input,
       scope: this.scope,
+      // The classifier cannot enforce read-only without being told. This is
+      // the second line of defence behind the SDK's plan permission mode:
+      // canUseTool is OUR boundary and should not depend on the SDK honouring
+      // a mode we asked for.
+      writeCapable: this.mode === 'work',
       ...(opts.blockedPath ? { blockedPath: opts.blockedPath } : {}),
     });
     const action = this.policy(classification.class);

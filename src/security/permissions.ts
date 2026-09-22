@@ -429,12 +429,66 @@ export interface ClassifyOptions {
   scope: FilesystemScope;
   /** Path the SDK reported as blocked, when it supplied one. */
   blockedPath?: string;
+  /**
+   * Whether this session is allowed to change anything at all.
+   *
+   * False for `inspect` and `plan` sessions. The tool schema tells the model
+   * that "inspect is read-only", the session row records writeCapable: false,
+   * and a prompt sentence asks the worker to look but not touch -- and until
+   * this existed, not one of those three was enforced anywhere. writeCapable
+   * was written to the database and read only to decide whether to take the
+   * project write lock.
+   */
+  writeCapable?: boolean;
+}
+
+/**
+ * The class a call would have in a normal session.
+ *
+ * Separate from classifyToolCall so the read-only gate can ask "is this a
+ * read?" without recursing through itself.
+ */
+function classifyForWriteCheck(
+  toolName: string,
+  input: Record<string, unknown>,
+  scope: FilesystemScope,
+  paths: string[],
+): PermissionClass {
+  if (toolName === 'Bash' || toolName === 'BashCommand') {
+    const command = typeof input['command'] === 'string' ? input['command'] : '';
+    return escalateForBashPaths(command, scope, classifyBashCommand(command)).class;
+  }
+  if (WRITE_TOOLS.has(toolName)) return 'LOCAL_REVERSIBLE';
+  if (CONTROL_TOOLS.has(toolName)) return 'READ_ONLY';
+  if (READ_ONLY_TOOLS.has(toolName)) {
+    // A read outside the scope is still refused on its own merits later.
+    return paths.every((path) => scope.check(path, 'read').allowed) ? 'READ_ONLY' : 'PROHIBITED';
+  }
+  return 'EXTERNAL_SIDE_EFFECT';
 }
 
 export function classifyToolCall(options: ClassifyOptions): PermissionClassification {
   const { toolName, input, scope } = options;
   const paths = extractPaths(toolName, input);
   if (options.blockedPath) paths.push(options.blockedPath);
+
+  // A read-only session refuses anything that is not a read, rather than
+  // asking politely for it. Checked FIRST, before the per-tool branches, so a
+  // new tool cannot arrive on the permissive side of it -- and stated as the
+  // reason, so the model learns the constraint rather than guessing at a
+  // refusal. Reads and inspection commands still work, which is the whole
+  // point of an inspect session.
+  if (options.writeCapable === false) {
+    const would = classifyForWriteCheck(toolName, input, scope, paths);
+    if (would !== 'READ_ONLY') {
+      return {
+        class: 'PROHIBITED',
+        reason: `this session is read-only (inspect or plan mode); ${toolName} would be ${would}`,
+        summary: `${toolName} refused: read-only session`,
+        ...(paths.length > 0 ? { paths } : {}),
+      };
+    }
+  }
 
   // MCP tools from other servers are opaque to us. Treat them as external.
   if (toolName.startsWith('mcp__')) {
