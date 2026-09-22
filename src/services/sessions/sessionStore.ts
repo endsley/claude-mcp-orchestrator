@@ -509,17 +509,6 @@ export class WorkSessionStore {
   }
 
   /** Requests open longer than `maxAgeMs`, used to fail abandoned sessions. */
-  listStaleOpenRequests(maxAgeMs: number, now = new Date()): PendingRequest[] {
-    const cutoff = new Date(now.getTime() - maxAgeMs).toISOString();
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM pending_requests
-         WHERE answered_at IS NULL AND voided_at IS NULL AND created_at <= ?`,
-      )
-      .all(cutoff) as PendingRequestRow[];
-    return rows.map(rowToPendingRequest);
-  }
-
   // --------------------------------------------------------------- artifacts
 
   registerArtifact(input: Omit<Artifact, 'id' | 'createdAt'>): Artifact {

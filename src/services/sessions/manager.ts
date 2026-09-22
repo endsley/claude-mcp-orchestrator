@@ -493,20 +493,37 @@ export class SessionManager {
    * meaning, but it makes resuming an old session quietly futile, so the
    * remaining time is surfaced instead of discovered.
    */
+  private isPastLifetimeCap(session: WorkSession): boolean {
+    const startedAt = Date.parse(session.startedAt ?? session.createdAt);
+    // An unparseable timestamp is never treated as expired.
+    if (!Number.isFinite(startedAt)) return false;
+    return Date.now() - startedAt > this.deps.claudeConfig.sessionTimeoutMs;
+  }
+
   private remainingLifetimeNote(session: WorkSession): string | undefined {
     const cap = this.deps.claudeConfig.sessionTimeoutMs;
     const startedAt = Date.parse(session.startedAt ?? session.createdAt);
     if (!Number.isFinite(startedAt)) return undefined;
     const remainingMs = cap - (Date.now() - startedAt);
-    if (remainingMs <= 0) {
-      return 'This session is already past its wall-clock cap and will be ended on the next sweep; start a new session instead.';
-    }
+    // Past-cap sessions never reach here: recoverWorker refuses them outright.
+    if (remainingMs <= 0) return undefined;
     if (remainingMs > 10 * 60_000) return undefined;
     return `Only about ${Math.max(1, Math.round(remainingMs / 60_000))} minute(s) remain before this session reaches its wall-clock cap.`;
   }
 
   /** Rebuild a worker for a session whose process is gone, resuming if possible. */
   private async recoverWorker(session: WorkSession): Promise<WorkerLike> {
+    // Refuse rather than spawn. Telling someone to start a new session while
+    // handing them a worker the reaper ends within the minute is incoherent,
+    // and it costs a Claude child process to say it. The session's progress
+    // and summaries remain readable through get_work_session_status.
+    if (this.isPastLifetimeCap(session)) {
+      throw orchestratorError(
+        'SESSION_TIMED_OUT',
+        `work session ${session.id} is past its wall-clock cap and cannot be resumed; start a new session`,
+        { details: { sessionId: session.id } },
+      );
+    }
     const project = session.projectId ? await this.safeGetProject(session.projectId) : undefined;
     const cwd = project?.path ?? process.cwd();
     const worker = this.buildWorker(session.id, cwd);

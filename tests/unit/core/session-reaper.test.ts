@@ -211,12 +211,28 @@ describe('session reaper', () => {
    * resuming an old session could hand back a worker the reaper retired a
    * minute later. The remaining time has to be visible, not discovered.
    */
-  it('warns on resume when a session is already past its cap', async () => {
+  it('refuses to resume a session that is past its cap', async () => {
     const { sessionId } = await manager.startSession({ instruction: 'Fix the nav', project: 'demo' });
     // Age the session past the cap and drop the live worker, forcing recovery.
-    store.setStatus(sessionId, 'interrupted', { summary: 'server restarted' });
     db.prepare('UPDATE work_sessions SET started_at = ?, status = ? WHERE id = ?').run(
       new Date(Date.now() - 5 * HOUR).toISOString(),
+      'idle',
+      sessionId,
+    );
+    await manager.shutdown();
+
+    // Spawning a worker only for the reaper to end it a minute later is waste
+    // and incoherent advice; refuse instead.
+    await expect(manager.sendInstruction(sessionId, 'carry on')).rejects.toMatchObject({
+      code: 'SESSION_TIMED_OUT',
+    });
+  });
+
+  it('warns, but still resumes, when a session is close to its cap', async () => {
+    const { sessionId } = await manager.startSession({ instruction: 'Fix the nav', project: 'demo' });
+    // Two hour cap, aged to leave roughly five minutes.
+    db.prepare('UPDATE work_sessions SET started_at = ?, status = ? WHERE id = ?').run(
+      new Date(Date.now() - (2 * HOUR - 5 * 60_000)).toISOString(),
       'idle',
       sessionId,
     );
@@ -225,7 +241,7 @@ describe('session reaper', () => {
     await manager.sendInstruction(sessionId, 'carry on');
 
     const warnings = manager.getStatus(sessionId).warnings.join(' ');
-    expect(warnings).toMatch(/past its wall-clock cap/i);
+    expect(warnings).toMatch(/wall-clock cap/i);
   });
 
   it('says nothing about the cap when a resumed session has plenty of time', async () => {

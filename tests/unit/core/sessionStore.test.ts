@@ -128,13 +128,6 @@ describe('pending requests', () => {
     expect(() => store.answerPendingRequest(request.requestId, 'Top')).toThrow(/no longer open/i);
   });
 
-  it('finds requests that have been open too long', () => {
-    const session = newSession();
-    store.createPendingRequest({ workSessionId: session.id, type: 'question', question: 'Which?' });
-    const future = new Date(Date.now() + 60_000);
-    expect(store.listStaleOpenRequests(1000, future)).toHaveLength(1);
-    expect(store.listStaleOpenRequests(120_000, future)).toHaveLength(0);
-  });
 });
 
 describe('progress events', () => {
