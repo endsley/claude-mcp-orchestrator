@@ -1,3 +1,4 @@
+import { MATCH_AMBIGUITY_GAP, MATCH_SCORE_FLOOR } from './matching.js';
 import { execFile as execFileCallback } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -315,7 +316,11 @@ export class ProjectRegistry {
     if (exact.length > 1) return { kind: 'ambiguous', candidates: exact.map((entry) => entry.project) };
     const best = scored[0];
     const next = scored[1];
-    if (best !== undefined && best.score >= 0.78 && (next === undefined || best.score - next.score >= 0.16)) {
+    if (
+      best !== undefined &&
+      best.score >= MATCH_SCORE_FLOOR &&
+      (next === undefined || best.score - next.score >= MATCH_AMBIGUITY_GAP)
+    ) {
       return { kind: 'match', project: best.project, candidates: [] };
     }
     const candidates = scored.filter((entry) => entry.score >= 0.55).slice(0, 5).map((entry) => entry.project);

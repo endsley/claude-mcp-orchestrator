@@ -131,6 +131,25 @@ interface ProjectIndex {
  * and never mutates, so a caller must build one per resolution against the
  * same snapshot it scores.
  */
+/**
+ * When a fuzzy score is good enough to act on, and when it is too close to call.
+ *
+ * These lived as bare 0.78 and 0.16 inline at two call sites -- the project
+ * registry and the computer service -- and a THIRD time as mirrored constants
+ * in the test, which therefore asserted against its own copy rather than
+ * against what resolve() does. Tuning the real numbers would have left every
+ * test passing. Same drift this codebase has already been bitten by when a
+ * policy had two homes; one home, imported everywhere, including by the tests.
+ */
+export const MATCH_SCORE_FLOOR = 0.78;
+
+/**
+ * How far the best candidate must beat the runner-up. Below this the answer is
+ * ambiguous and the user is asked which one they meant, which is far better
+ * than picking confidently between two near-identical names.
+ */
+export const MATCH_AMBIGUITY_GAP = 0.16;
+
 export class ProjectMatcher {
   private readonly documentFrequency = new Map<string, number>();
   private readonly vocabulary = new Set<string>();

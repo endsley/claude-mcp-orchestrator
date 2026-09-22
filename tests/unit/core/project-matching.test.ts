@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ProjectMatcher, contentTokens, projectLabels } from '../../../src/services/projects/matching.js';
+import { MATCH_AMBIGUITY_GAP, MATCH_SCORE_FLOOR, ProjectMatcher, contentTokens, projectLabels } from '../../../src/services/projects/matching.js';
 import { normalizeLookup } from '../../../src/context/text.js';
 import type { Project } from '../../../src/types/projects.js';
 
@@ -47,14 +47,15 @@ function rank(query: string): { name: string; score: number }[] {
     .sort((left, right) => right.score - left.score);
 }
 
-/** The thresholds resolve() applies, mirrored so the tests assert real outcomes. */
-const MATCH_SCORE = 0.78;
-const MATCH_GAP = 0.16;
-
+/**
+ * The thresholds resolve() applies, IMPORTED rather than mirrored. They used to
+ * be copied here as local constants, so tuning the real 0.78 or 0.16 left every
+ * one of these tests passing against the old values.
+ */
 function resolves(query: string): string | undefined {
   const [best, next] = rank(query);
-  if (!best || best.score < MATCH_SCORE) return undefined;
-  if (next && best.score - next.score < MATCH_GAP) return undefined;
+  if (!best || best.score < MATCH_SCORE_FLOOR) return undefined;
+  if (next && best.score - next.score < MATCH_AMBIGUITY_GAP) return undefined;
   return best.name;
 }
 
@@ -116,7 +117,7 @@ describe('ProjectMatcher', () => {
   });
 
   it('still finds nothing for a project that does not exist', () => {
-    expect(rank('the quarterly budget spreadsheet')[0]!.score).toBeLessThan(MATCH_SCORE);
+    expect(rank('the quarterly budget spreadsheet')[0]!.score).toBeLessThan(MATCH_SCORE_FLOOR);
   });
 
   /**
@@ -140,7 +141,7 @@ describe('ProjectMatcher', () => {
 
   it('does not route a mostly-unknown request to an existing project', () => {
     // "mcp" is the only corpus word here, but this asks for a NEW project.
-    expect(rank('new private mcp')[0]!.score).toBeLessThan(MATCH_SCORE);
+    expect(rank('new private mcp')[0]!.score).toBeLessThan(MATCH_SCORE_FLOOR);
   });
 
   it('cannot be pushed over the specificity floor by repetition', () => {
@@ -177,9 +178,20 @@ describe('ProjectMatcher', () => {
   });
 
   it('bounds the work an oversized query can force', () => {
-    const huge = 'mcp '.repeat(5000);
+    // DISTINCT tokens. This used to be 'mcp '.repeat(5000) -- five thousand
+    // copies of ONE word, which prepare() deduplicates to a single token, so
+    // the <=24 cap was satisfied before any capping happened and the test
+    // bounded nothing. Five thousand different tokens is the input that
+    // actually exercises the limit.
+    const huge = Array.from({ length: 5000 }, (_, index) => `tok${index}`).join(' ');
+    const distinct = new Set(huge.split(' ')).size;
+    expect(distinct).toBe(5000);
+
     const started = Date.now();
-    expect(matcher.queryTokens(huge).length).toBeLessThanOrEqual(24);
+    const tokens = matcher.queryTokens(huge);
+    expect(tokens.length).toBeLessThanOrEqual(24);
+    // And the cap is what limited it, not deduplication.
+    expect(new Set(tokens).size).toBe(tokens.length);
     expect(Date.now() - started).toBeLessThan(1000);
   });
 

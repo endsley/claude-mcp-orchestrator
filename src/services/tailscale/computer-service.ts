@@ -1,3 +1,4 @@
+import { MATCH_AMBIGUITY_GAP, MATCH_SCORE_FLOOR } from '../projects/matching.js';
 import { orchestratorError } from '../../types/errors.js';
 import { normalizeLookup, similarity } from '../../context/text.js';
 import type { TailscaleClient } from './tailscale-client.js';
@@ -157,7 +158,11 @@ export class ComputerService {
     if (exact.length > 1) return { kind: 'ambiguous', candidates: exact.map((candidate) => candidate.computer) };
     const best = scored[0];
     const next = scored[1];
-    if (best !== undefined && best.score >= 0.78 && (next === undefined || best.score - next.score >= 0.16)) {
+    if (
+      best !== undefined &&
+      best.score >= MATCH_SCORE_FLOOR &&
+      (next === undefined || best.score - next.score >= MATCH_AMBIGUITY_GAP)
+    ) {
       return { kind: 'match', computer: best.computer, candidates: [] };
     }
     const candidates = scored.filter((candidate) => candidate.score >= 0.55).slice(0, 5).map((candidate) => candidate.computer);
