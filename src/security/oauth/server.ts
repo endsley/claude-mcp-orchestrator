@@ -467,6 +467,9 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
       }
       const access = store.issueToken({
         kind: 'access',
+        // Linked to the NEW refresh token, so a later theft verdict on this
+        // chain revokes this access token too.
+        parentToken: rotated.next.token,
         clientId: rotated.record.clientId,
         audience: rotated.record.audience,
         scope: rotated.record.scope,
@@ -486,19 +489,23 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
   });
 
   function issueTokenPair(res: Response, clientId: string, audience: string, scope: string): void {
-    const access = store.issueToken({
-      kind: 'access',
-      clientId,
-      audience: canonicalResource(audience),
-      scope,
-      ttlMs: options.accessTokenTtlMs,
-    });
+    // Refresh is minted FIRST so the access token can record which chain it
+    // belongs to; reuse detection revokes a chain and needs to take that
+    // chain's access tokens with it.
     const refresh = store.issueToken({
       kind: 'refresh',
       clientId,
       audience: canonicalResource(audience),
       scope,
       ttlMs: options.refreshTokenTtlMs,
+    });
+    const access = store.issueToken({
+      kind: 'access',
+      parentToken: refresh.token,
+      clientId,
+      audience: canonicalResource(audience),
+      scope,
+      ttlMs: options.accessTokenTtlMs,
     });
     res.json({
       access_token: access.token,

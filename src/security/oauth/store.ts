@@ -230,6 +230,12 @@ export class OAuthStore {
 
   issueToken(input: {
     kind: 'access' | 'refresh';
+    /**
+     * The refresh token this one belongs to, if any. Recorded hashed so a
+     * compromised chain can take its access tokens with it. Callers pass the
+     * plain token and never touch hashes.
+     */
+    parentToken?: string;
     clientId: string;
     audience: string;
     scope: string;
@@ -239,10 +245,19 @@ export class OAuthStore {
     const expiresAt = new Date(Date.now() + input.ttlMs);
     this.db
       .prepare(
-        `INSERT INTO oauth_tokens (token_hash, kind, client_id, audience, scope, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO oauth_tokens (token_hash, kind, client_id, audience, scope, expires_at, created_at, parent_token_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(hashSecret(token), input.kind, input.clientId, input.audience, input.scope, expiresAt.toISOString(), this.now());
+      .run(
+        hashSecret(token),
+        input.kind,
+        input.clientId,
+        input.audience,
+        input.scope,
+        expiresAt.toISOString(),
+        this.now(),
+        input.parentToken === undefined ? null : hashSecret(input.parentToken),
+      );
     return { token, expiresAt };
   }
 
@@ -374,6 +389,16 @@ export class OAuthStore {
             .run(now.toISOString(), hash);
           revoked += 1;
         }
+        // Take this link's access tokens with it. Without this the refresh
+        // chain died while the thief kept calling the API until the access
+        // token expired on its own. Scoped to this link's children only, so
+        // an unrelated session of the same client is untouched.
+        revoked += this.db
+          .prepare(
+            `UPDATE oauth_tokens SET revoked_at = ?
+             WHERE parent_token_hash = ? AND kind = 'access' AND revoked_at IS NULL`,
+          )
+          .run(now.toISOString(), hash).changes;
         hash = row.rotated_to ?? undefined;
       }
       return { revoked, truncated };

@@ -195,6 +195,23 @@ export const MIGRATIONS: Migration[] = [
       `CREATE INDEX idx_oauth_tokens_expiry ON oauth_tokens(expires_at)`,
     ],
   },
+  {
+    version: 4,
+    name: 'link access tokens to the refresh token that minted them',
+    statements: [
+      /*
+       * Reuse detection revokes a compromised refresh chain, but the access
+       * tokens issued alongside it had no recorded relationship to that
+       * chain, so they stayed live until their own expiry and a detected
+       * thief kept API access for up to accessTokenTtlMs. Nullable on
+       * purpose: rows written before this migration have no parent and are
+       * simply not chain-revocable, which is the pre-existing behaviour
+       * rather than a regression.
+       */
+      `ALTER TABLE oauth_tokens ADD COLUMN parent_token_hash TEXT`,
+      `CREATE INDEX idx_oauth_tokens_parent ON oauth_tokens(parent_token_hash)`,
+    ],
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;

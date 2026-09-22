@@ -125,6 +125,81 @@ describe('classifyRefreshReplay', () => {
     expect(subject.lookupToken(innocentNext, 'refresh')).toBeDefined();
   });
 
+  /**
+   * Revoking the refresh chain used to leave the access tokens issued
+   * alongside it live until their own expiry, so a detected thief kept
+   * calling the API for up to accessTokenTtlMs after detection. There was no
+   * way to scope that: nothing recorded which chain an access token belonged
+   * to.
+   */
+  it('takes the chain\'s access tokens with it', () => {
+    const subject = store();
+    const client = subject.registerClient({ redirectUris: ['https://claude.ai/cb'] });
+    const refresh = subject.issueToken({
+      kind: 'refresh', clientId: client.clientId, audience: 'https://x/mcp', scope: 'mcp', ttlMs: 600_000,
+    });
+    const access = subject.issueToken({
+      kind: 'access', parentToken: refresh.token, clientId: client.clientId,
+      audience: 'https://x/mcp', scope: 'mcp', ttlMs: 600_000,
+    });
+    const next = subject.rotateRefreshToken(refresh.token, 600_000)!;
+    const accessAfterRotation = subject.issueToken({
+      kind: 'access', parentToken: next.next.token, clientId: client.clientId,
+      audience: 'https://x/mcp', scope: 'mcp', ttlMs: 600_000,
+    });
+
+    expect(subject.lookupToken(access.token, 'access')).toBeDefined();
+    expect(subject.lookupToken(accessAfterRotation.token, 'access')).toBeDefined();
+
+    const verdict = subject.classifyRefreshReplay(refresh.token, 0);
+    expect(verdict.verdict).toBe('theft');
+
+    // Both links' access tokens are gone, not just the head's.
+    expect(subject.lookupToken(access.token, 'access')).toBeUndefined();
+    expect(subject.lookupToken(accessAfterRotation.token, 'access')).toBeUndefined();
+  });
+
+  it('does not touch another session\'s access token', () => {
+    const subject = store();
+    const client = subject.registerClient({ redirectUris: ['https://claude.ai/cb'] });
+    const mintPair = (): { refresh: string; access: string } => {
+      const r = subject.issueToken({
+        kind: 'refresh', clientId: client.clientId, audience: 'https://x/mcp', scope: 'mcp', ttlMs: 600_000,
+      });
+      const a = subject.issueToken({
+        kind: 'access', parentToken: r.token, clientId: client.clientId,
+        audience: 'https://x/mcp', scope: 'mcp', ttlMs: 600_000,
+      });
+      return { refresh: r.token, access: a.token };
+    };
+    const compromised = mintPair();
+    const innocent = mintPair();
+    subject.rotateRefreshToken(compromised.refresh, 600_000);
+
+    expect(subject.classifyRefreshReplay(compromised.refresh, 0).verdict).toBe('theft');
+
+    expect(subject.lookupToken(compromised.access, 'access')).toBeUndefined();
+    // The laptop session keeps working.
+    expect(subject.lookupToken(innocent.access, 'access')).toBeDefined();
+  });
+
+  it('tolerates a pre-migration access token with no recorded parent', () => {
+    const subject = store();
+    const client = subject.registerClient({ redirectUris: ['https://claude.ai/cb'] });
+    const refresh = subject.issueToken({
+      kind: 'refresh', clientId: client.clientId, audience: 'https://x/mcp', scope: 'mcp', ttlMs: 600_000,
+    });
+    // No parentToken: exactly what rows written before the migration look like.
+    const orphan = subject.issueToken({
+      kind: 'access', clientId: client.clientId, audience: 'https://x/mcp', scope: 'mcp', ttlMs: 600_000,
+    });
+    subject.rotateRefreshToken(refresh.token, 600_000);
+
+    expect(subject.classifyRefreshReplay(refresh.token, 0).verdict).toBe('theft');
+    // Not chain-revocable, which is the old behaviour rather than a crash.
+    expect(subject.lookupToken(orphan.token, 'access')).toBeDefined();
+  });
+
   it('reports a truncated walk so missed descendants are visible', () => {
     const subject = store();
     const { r1, r2 } = chainOfTwo(subject);
