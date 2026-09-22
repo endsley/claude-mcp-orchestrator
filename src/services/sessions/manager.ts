@@ -485,6 +485,26 @@ export class SessionManager {
     return { interrupted, locksReleased };
   }
 
+  /**
+   * A warning when a session is at or near its wall-clock cap.
+   *
+   * `started_at` is written with COALESCE and so survives a resume: the cap is
+   * a cap on the whole session, not on the current run. That is the documented
+   * meaning, but it makes resuming an old session quietly futile, so the
+   * remaining time is surfaced instead of discovered.
+   */
+  private remainingLifetimeNote(session: WorkSession): string | undefined {
+    const cap = this.deps.claudeConfig.sessionTimeoutMs;
+    const startedAt = Date.parse(session.startedAt ?? session.createdAt);
+    if (!Number.isFinite(startedAt)) return undefined;
+    const remainingMs = cap - (Date.now() - startedAt);
+    if (remainingMs <= 0) {
+      return 'This session is already past its wall-clock cap and will be ended on the next sweep; start a new session instead.';
+    }
+    if (remainingMs > 10 * 60_000) return undefined;
+    return `Only about ${Math.max(1, Math.round(remainingMs / 60_000))} minute(s) remain before this session reaches its wall-clock cap.`;
+  }
+
   /** Rebuild a worker for a session whose process is gone, resuming if possible. */
   private async recoverWorker(session: WorkSession): Promise<WorkerLike> {
     const project = session.projectId ? await this.safeGetProject(session.projectId) : undefined;
@@ -510,9 +530,14 @@ export class SessionManager {
       });
     }
 
-    const note = canResume
+    const base = canResume
       ? 'Worker restarted and resumed the previous Claude session.'
       : 'Worker restarted from a summary; earlier conversation detail was not recovered.';
+    // The cap counts from the ORIGINAL start and is not reset by a resume, so
+    // resuming a long-lived session can hand back a worker the reaper retires
+    // a minute later. Say so rather than letting it happen silently.
+    const capNote = this.remainingLifetimeNote(session);
+    const note = capNote ? `${base} ${capNote}` : base;
     this.store.recordRecovery(session.id, note);
     this.store.appendProgress(session.id, 'recovered', note);
     this.logger.info('recovered worker', { workSessionId: session.id, resumed: canResume });

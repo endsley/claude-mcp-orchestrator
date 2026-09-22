@@ -206,6 +206,39 @@ describe('session reaper', () => {
     expect(failed.error?.fromWorker).toBe(false);
   });
 
+  /**
+   * The cap counts from the original start and a resume does not reset it, so
+   * resuming an old session could hand back a worker the reaper retired a
+   * minute later. The remaining time has to be visible, not discovered.
+   */
+  it('warns on resume when a session is already past its cap', async () => {
+    const { sessionId } = await manager.startSession({ instruction: 'Fix the nav', project: 'demo' });
+    // Age the session past the cap and drop the live worker, forcing recovery.
+    store.setStatus(sessionId, 'interrupted', { summary: 'server restarted' });
+    db.prepare('UPDATE work_sessions SET started_at = ?, status = ? WHERE id = ?').run(
+      new Date(Date.now() - 5 * HOUR).toISOString(),
+      'idle',
+      sessionId,
+    );
+    await manager.shutdown();
+
+    await manager.sendInstruction(sessionId, 'carry on');
+
+    const warnings = manager.getStatus(sessionId).warnings.join(' ');
+    expect(warnings).toMatch(/past its wall-clock cap/i);
+  });
+
+  it('says nothing about the cap when a resumed session has plenty of time', async () => {
+    const { sessionId } = await manager.startSession({ instruction: 'Fix the nav', project: 'demo' });
+    db.prepare('UPDATE work_sessions SET status = ? WHERE id = ?').run('idle', sessionId);
+    await manager.shutdown();
+
+    await manager.sendInstruction(sessionId, 'carry on');
+
+    const warnings = manager.getStatus(sessionId).warnings.join(' ');
+    expect(warnings).not.toMatch(/wall-clock cap/i);
+  });
+
   it('startReaper is idempotent and stopReaper is safe to call twice', () => {
     manager.startReaper(60_000);
     manager.startReaper(60_000);
