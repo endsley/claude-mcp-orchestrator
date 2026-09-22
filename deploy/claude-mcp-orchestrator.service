@@ -48,6 +48,12 @@ RestartSec=5
 
 # SIGTERM triggers the graceful shutdown path (drain HTTP, stop workers).
 KillSignal=SIGTERM
+# Left at the default, control-group, deliberately and load-bearingly: the
+# worker spawns `claude` child processes, and an AbortController cannot reach
+# them if this process is SIGKILLed. The cgroup teardown is what guarantees no
+# orphaned workers survive a stop, a restart, or a crash cycle. Running the
+# binary outside systemd gives up that guarantee.
+KillMode=control-group
 TimeoutStopSec=30
 
 # The worker legitimately spawns Claude Code, which reads and writes project

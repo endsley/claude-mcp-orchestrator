@@ -184,6 +184,35 @@ export class ClaudeWorker implements WorkerLike {
   }
 
   /** Terminate the worker and release its resources. */
+  /**
+   * Shut the worker down and release its child process.
+   *
+   * What this covers, and what it does not, because the difference matters and
+   * was raised as a possible process leak.
+   *
+   * Covered: every graceful path. The input queue closes, the abort controller
+   * signals the SDK, and the consume loop is awaited so the child exits before
+   * this resolves. SessionManager calls it on failure, cancellation, timeout
+   * reaping and shutdown.
+   *
+   * NOT covered by this method: the orchestrator being SIGKILLed. An
+   * AbortController only signals in-process machinery, so a `kill -9` of the
+   * main PID cannot run any of this, and on restart recoverOnStartup can only
+   * dispose workers it finds in its own (now empty) map.
+   *
+   * That case is handled by the deployment rather than by code. The unit runs
+   * with systemd's default KillMode=control-group, so every `claude` child
+   * lives in the service cgroup and is torn down with it - on stop, on
+   * restart, and when Restart=on-failure cycles the unit after a crash.
+   * Measured rather than assumed: after 24 restarts in one evening, including
+   * ones that reported interrupted sessions, there were zero surviving
+   * orchestrator workers on the host.
+   *
+   * The consequence to remember: running `node dist/index.js` by hand, outside
+   * systemd, loses that safety net entirely. A SIGKILL there really does leave
+   * reparented `claude` processes holding their pipes. Do not add a PID-file
+   * reaper for the systemd case; it is already covered.
+   */
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
