@@ -264,3 +264,62 @@ describe('requested scope is validated before it is shown to anyone', () => {
     await res.text();
   });
 });
+
+/**
+ * redirect_uri must match EXACTLY. The comment above the check calls a prefix
+ * match "the classic open-redirect bug", and a mutation sweep showed nothing
+ * tested it: turning `includes` into a `startsWith` left all 377 tests green.
+ */
+describe('redirect_uri is matched exactly', () => {
+  const REGISTERED = 'https://claude.ai/api/mcp/auth_callback';
+
+  async function authorizeWithRedirect(redirectUri: string): Promise<Response> {
+    const reg = await fetch(`${base}/oauth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ client_name: 'Redirect', redirect_uris: [REGISTERED] }),
+    });
+    const { client_id: clientId } = (await reg.json()) as { client_id: string };
+    const { challenge } = pkce();
+    return fetch(
+      `${base}/oauth/authorize?${new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        response_type: 'code',
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        state: 'xyz',
+        resource: `${issuer}/mcp`,
+      })}`,
+      { redirect: 'manual' },
+    );
+  }
+
+  it('refuses a redirect_uri that merely starts with a registered one', async () => {
+    const attacker = `${REGISTERED}.attacker.example/steal`;
+    expect(attacker.startsWith(REGISTERED)).toBe(true);
+
+    const res = await authorizeWithRedirect(attacker);
+
+    // Must be refused outright - NOT a consent page, and NOT a redirect to
+    // the attacker, either of which would be the open redirect.
+    expect(res.status).toBe(400);
+    expect(res.headers.get('location')).toBeNull();
+  }, 30_000);
+
+  it.each([
+    `https://claude.ai/api/mcp/auth_callback/extra`,
+    `https://claude.ai/api/mcp/auth_callback?next=https://evil.example`,
+    `http://claude.ai/api/mcp/auth_callback`,
+    `https://claude.ai/api/mcp/auth_callbackX`,
+  ])('refuses %s', async (candidate) => {
+    const res = await authorizeWithRedirect(candidate);
+    expect(res.status).toBe(400);
+  }, 30_000);
+
+  it('still serves the consent page for the exact registered value', async () => {
+    const res = await authorizeWithRedirect(REGISTERED);
+    expect(res.status).toBe(200);
+    await res.text();
+  }, 30_000);
+});
