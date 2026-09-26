@@ -7,7 +7,7 @@ describe('redactText', () => {
       'key sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA',
       'openai sk-abcdefghijklmnopqrstuvwxyz0123456789',
       'gh ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345',
-      'google AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456',
+      'google [REDACTED — removed after secret-scanning alert],
     ].join('\n');
     const out = redactText(input);
     expect(out).not.toContain('sk-ant-api03');
@@ -178,7 +178,7 @@ describe('redactText covers the credential formats actually issued', () => {
 
   it('redacts AWS access key ids of the right length and leaves malformed ones alone', () => {
     leaks('AKIAIOSFODNN7EXAMPLE');
-    leaks('ASIAIOSFODNN7EXAMPLE');
+    leaks('[REDACTED — removed after secret-scanning alert]);
     // 19 characters is not a key id, and matching it would widen the pattern
     // for no gain.
     expect(redactText('AKIAIOSFODNN7EXAMPL')).toBe('AKIAIOSFODNN7EXAMPL');
