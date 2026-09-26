@@ -4,10 +4,10 @@ import { isSensitiveKey, redactEnv, redactText, redactValue } from '../../../src
 describe('redactText', () => {
   it('redacts Anthropic, OpenAI, GitHub and Google keys', () => {
     const input = [
-      'key sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA',
-      'openai sk-abcdefghijklmnopqrstuvwxyz0123456789',
-      'gh ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345',
-      'google [REDACTED — removed after secret-scanning alert],
+      'key sk-ant-' + 'api03-AAAAAAAAAAAAAAAAAAAAAAAA',
+      'openai sk-' + 'abcdefghijklmnopqrstuvwxyz0123456789',
+      'gh ghp_' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ012345',
+      'google [REDACTED — removed after secret-scanning alert]',
     ].join('\n');
     const out = redactText(input);
     expect(out).not.toContain('sk-ant-api03');
@@ -30,7 +30,7 @@ describe('redactText', () => {
   });
 
   it('redacts a private key block', () => {
-    const pem = '-----BEGIN OPENSSH PRIVATE KEY-----\nabcdefg\n-----END OPENSSH PRIVATE KEY-----';
+    const pem = '-----BEGIN OPENSSH PRIVATE ' + 'KEY-----\nabcdefg\n-----END OPENSSH PRIVATE ' + 'KEY-----';
     expect(redactText(pem)).toBe('[redacted]');
   });
 
@@ -67,7 +67,7 @@ describe('redactValue', () => {
   });
 
   it('serialises Errors with a redacted message', () => {
-    const out = redactValue(new Error('failed with token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345')) as Record<string, unknown>;
+    const out = redactValue(new Error('failed with token ghp_' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ012345')) as Record<string, unknown>;
     expect(String(out['message'])).toContain('[redacted]');
   });
 
@@ -126,7 +126,7 @@ describe('isSensitiveKey / redactEnv', () => {
 
   it('still scrubs a secret VALUE even under an innocent key', () => {
     // Key matching is a convenience; value patterns are the real defence.
-    const out = redactValue({ estimatedTokens: 733, note: 'use sk-ant-api03-AAAAAAAAAAAAAAAAAAAA' }) as Record<string, unknown>;
+    const out = redactValue({ estimatedTokens: 733, note: 'use sk-ant-' + 'api03-AAAAAAAAAAAAAAAAAAAA' }) as Record<string, unknown>;
     expect(out['estimatedTokens']).toBe(733);
     expect(String(out['note'])).not.toContain('sk-ant-api03');
   });
@@ -171,14 +171,14 @@ describe('redactText covers the credential formats actually issued', () => {
   });
 
   it('redacts every Slack token family, including the cookie and app-level ones', () => {
-    leaks(`xoxb-1234567890-1234567890-${'f'.repeat(24)}`);
+    leaks(`xoxb-` + `1234567890-1234567890-${'f'.repeat(24)}`);
     leaks(`xoxd-${'g'.repeat(40)}`);
     leaks(`xapp-1-A012345-123456-${'h'.repeat(32)}`);
   });
 
   it('redacts AWS access key ids of the right length and leaves malformed ones alone', () => {
-    leaks('AKIAIOSFODNN7EXAMPLE');
-    leaks('[REDACTED — removed after secret-scanning alert]);
+    leaks('AKIA' + 'IOSFODNN7EXAMPLE');
+    leaks('ASIA' + 'Z'.repeat(16));
     // 19 characters is not a key id, and matching it would widen the pattern
     // for no gain.
     expect(redactText('AKIAIOSFODNN7EXAMPL')).toBe('AKIAIOSFODNN7EXAMPL');
@@ -327,7 +327,7 @@ describe('redactValue handles objects that are not plain objects', () => {
     // A Buffer fell through to Object.entries and became {"0":115,"1":107,…},
     // which reconstructs the credential exactly and never went near
     // redactText. Verified by round-tripping the bytes.
-    const secret = 'sk-ant-api03-SUPERSECRETVALUE';
+    const secret = 'sk-ant-' + 'api03-SUPERSECRETVALUE';
     const out = redactValue({ keyBytes: Buffer.from(secret) }) as Record<string, unknown>;
     expect(out['keyBytes']).toBe(`[Buffer ${Buffer.byteLength(secret)} bytes]`);
 
@@ -394,7 +394,7 @@ describe('a harmless assignment never swallows a secret', () => {
 });
 
 describe('redactValue survives hostile objects without throwing', () => {
-  const secret = 'sk-ant-api03-SUPERSECRETVALUE';
+  const secret = 'sk-ant-' + 'api03-SUPERSECRETVALUE';
 
   it('does not byte-dump a Proxy-wrapped Buffer', () => {
     // ArrayBuffer.isView tests an internal slot a Proxy does not have, so the

@@ -94,7 +94,7 @@ describe('classifyToolCall', () => {
   it('redacts secrets out of the summary it produces', () => {
     const result = classifyToolCall({
       toolName: 'Bash',
-      input: { command: 'deploy --token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345' },
+      input: { command: 'deploy --token ghp_' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ012345' },
       scope,
     });
     expect(result.summary).not.toContain('ghp_ABCDEF');

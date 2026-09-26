@@ -101,14 +101,14 @@ describe('tool results are redacted on the way out', () => {
    * wiring gap: the unit tested, the wiring not.
    */
   it('redacts a secret in the spoken text', () => {
-    const result = toolResult('the api_key is sk-abcdefghijklmnopqrstuvwxyz0123456789');
+    const result = toolResult('the api_key is sk-' + 'abcdefghijklmnopqrstuvwxyz0123456789');
     const text = result.content[0]?.type === 'text' ? result.content[0].text : '';
-    expect(text).not.toContain('sk-abcdefghijklmnopqrstuvwxyz0123456789');
+    expect(text).not.toContain('sk-' + 'abcdefghijklmnopqrstuvwxyz0123456789');
   });
 
   it('redacts a secret in the structured payload', () => {
-    const result = toolResult('fine', { api_key: 'sk-abcdefghijklmnopqrstuvwxyz0123456789' });
-    expect(JSON.stringify(result.structuredContent)).not.toContain('sk-abcdefghijklmnopqrstuvwxyz0123456789');
+    const result = toolResult('fine', { api_key: 'sk-' + 'abcdefghijklmnopqrstuvwxyz0123456789' });
+    expect(JSON.stringify(result.structuredContent)).not.toContain('sk-' + 'abcdefghijklmnopqrstuvwxyz0123456789');
   });
 
   it('leaves ordinary prose untouched', () => {
