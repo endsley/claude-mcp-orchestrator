@@ -40,6 +40,8 @@ server:
     # Tokens shorter than 24 characters are rejected.
     tokenEnvVars: [MCP_ORCHESTRATOR_TOKEN]
     requiredScopes: []
+    # mcp = full access; board = coordination board tools only.
+    scopesSupported: [mcp, board]
 
 logging:
   level: info          # debug | info | warn | error
@@ -175,3 +177,19 @@ computers:
       ramGb: 64
       gpu: NVIDIA RTX A5000
       vramGb: 24
+
+# Coordination board access for outside agents (board-scoped OAuth tokens and
+# board token keys; see README "Outside agent access"). The board service
+# token lives in tokenFile (mode 600, outside Git) and is sent only to the
+# nodes listed here. Outside agents may coordinate only on the project
+# aliases listed under `projects`.
+board:
+  enabled: false
+  nodes:
+    - { name: primary, url: "http://100.64.0.1:8797" }
+    - { name: standby, url: "http://100.64.0.2:8797" }
+  tokenFile: ~/.local/share/board/board_token
+  projects:
+    example-project: /home/YOUR_USER/code/example-project
+  writesPerMinute: 30
+  readsPerMinute: 120

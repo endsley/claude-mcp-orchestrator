@@ -40,6 +40,12 @@ export const ORCHESTRATOR_ERROR_CODES = [
   'PATH_OUTSIDE_SCOPE',
   'ARTIFACT_NOT_FOUND',
   'RATE_LIMITED',
+  /** The network coordination board could not be reached. */
+  'BOARD_UNAVAILABLE',
+  /** A board claim overlaps another agent's live claim. */
+  'BOARD_CLAIM_CONFLICT',
+  /** The board ran the operation and refused it (bad input, no task, ...). */
+  'BOARD_REJECTED',
   'UNSAFE_DEPLOYMENT',
   'INTERNAL',
 ] as const;

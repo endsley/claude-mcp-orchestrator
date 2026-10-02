@@ -22,7 +22,8 @@
     "test:integration": "vitest run tests/integration",
     "test:watch": "vitest",
     "doctor": "tsx scripts/doctor.ts",
-    "bench": "tsx scripts/bench.ts"
+    "bench": "tsx scripts/bench.ts",
+    "board-key": "tsx scripts/board-key.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.278",

@@ -2,6 +2,7 @@ import express, { type NextFunction, type Request, type Response, type Router } 
 import type { Logger } from '../../logging/logger.js';
 import { type OAuthStore } from './store.js';
 import { canonicalResource, mintSecret, safeEquals, verifyPkce } from './tokens.js';
+import { describeScope, isKnownScope, SCOPE_BOARD, SCOPE_FULL, type Scope } from '../scopes.js';
 
 export interface OAuthServerOptions {
   /** Public origin this server is reached at, e.g. https://mcp.example.com */
@@ -152,11 +153,21 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
       state?: string;
       codeChallenge: string;
       codeChallengeMethod: string;
-      scope: string;
+      /** Scopes the approver may choose between; never wider than requested. */
+      scopeOptions: Scope[];
+      /** Preselected option. */
+      defaultScope: Scope;
       resource?: string;
       expiresAt: number;
     }
   >();
+
+  /**
+   * The scopes this server can actually grant: configured AND known to this
+   * build. A configured scope this build does not understand is not offered,
+   * because it would grant nothing.
+   */
+  const grantable = options.scopesSupported.filter(isKnownScope);
 
   const prunePending = (): void => {
     const now = Date.now();
@@ -336,31 +347,39 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
      * Validate the requested scope against what this server actually supports,
      * per RFC 6749's invalid_scope.
      *
-     * This is not only hygiene. The consent page RENDERS this string back to
-     * the user, and the resource server does not enforce scope at all - it
-     * checks audience only. Accepting an arbitrary value therefore let a
-     * crafted authorize link display a narrower permission than the token it
-     * produces: the screen could read "Scope: read-only" while the issued
-     * token was exactly as capable as any other. The consent screen is the
-     * control that exists so the user can see what they are approving, so it
-     * must not be able to show them attacker-supplied text as fact.
+     * This is not only hygiene. The consent page RENDERS the scope, and the
+     * resource server enforces it per tool (security/scopes.ts). Accepting an
+     * arbitrary value would let a crafted authorize link display a permission
+     * that means nothing, so an unsupported value is refused before any page
+     * is shown.
      *
      * A present-but-blank scope is treated as absent rather than rejected, so
      * a client sending `scope=` still gets the default.
      */
     const rawScope = q['scope'];
     const scopeRequested = rawScope !== undefined && rawScope.trim() !== '';
+    const requested = scopeRequested ? rawScope!.trim().split(/\s+/) : [];
     if (scopeRequested) {
-      const unsupported = rawScope!.trim().split(/\s+/).filter((value) => !options.scopesSupported.includes(value));
+      const unsupported = requested.filter((value) => !grantable.includes(value as Scope));
       if (unsupported.length > 0) {
-        fail('invalid_scope', `supported scopes are: ${options.scopesSupported.join(' ')}`);
+        fail('invalid_scope', `supported scopes are: ${grantable.join(' ')}`);
         return;
       }
     }
-    // Computed once. It used to be written out twice, for the pending entry
-    // and for the page, which is one edit away from the screen disagreeing
-    // with the grant.
-    const grantedScope = scopeRequested ? rawScope!.trim() : options.scopesSupported.join(' ');
+    /*
+     * What the approver may grant. Full access can always be narrowed to the
+     * board scope; a request for the board scope alone can never be widened.
+     * One scope is granted per token: `mcp` already includes the board tools.
+     */
+    const wantsFull = scopeRequested ? requested.includes(SCOPE_FULL) : grantable.includes(SCOPE_FULL);
+    const scopeOptions: Scope[] = [];
+    if (wantsFull && grantable.includes(SCOPE_FULL)) scopeOptions.push(SCOPE_FULL);
+    if (grantable.includes(SCOPE_BOARD)) scopeOptions.push(SCOPE_BOARD);
+    if (scopeOptions.length === 0) {
+      fail('invalid_scope', 'this server has no grantable scope configured');
+      return;
+    }
+    const defaultScope = scopeOptions[0]!;
 
     const requestId = mintSecret(16);
     pending.set(requestId, {
@@ -369,7 +388,8 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
       ...(q['state'] !== undefined ? { state: q['state'] } : {}),
       codeChallenge,
       codeChallengeMethod,
-      scope: grantedScope,
+      scopeOptions,
+      defaultScope,
       ...(q['resource'] !== undefined ? { resource: q['resource'] } : {}),
       expiresAt: Date.now() + 10 * 60_000,
     });
@@ -379,7 +399,8 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
       clientName: client.clientName ?? client.clientId,
       redirectUri,
       resource,
-      scope: grantedScope,
+      scopeOptions,
+      selected: defaultScope,
     }));
   });
 
@@ -389,6 +410,7 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
     const requestId = typeof body['request_id'] === 'string' ? body['request_id'] : '';
     const password = typeof body['password'] === 'string' ? body['password'] : '';
     const approved = body['approve'] === 'yes';
+    const chosenRaw = typeof body['scope'] === 'string' ? body['scope'] : undefined;
 
     const entry = pending.get(requestId);
     if (!entry) {
@@ -412,6 +434,17 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
       return;
     }
 
+    // The chosen scope must be one of the options this request was shown.
+    // Absent means the preselected option (what the page displayed). Anything
+    // else - a widened scope smuggled into the form - is refused outright.
+    const chosen = chosenRaw === undefined ? entry.defaultScope : entry.scopeOptions.find((option) => option === chosenRaw);
+    if (chosen === undefined) {
+      pending.delete(requestId);
+      logger.warn('consent posted a scope that was not offered', { clientId: entry.clientId });
+      res.status(400).type('html').send(errorPage('That permission was not offered for this request. Start again from the client.'));
+      return;
+    }
+
     if (!safeEquals(password, options.adminPassword)) {
       throttle.record(throttleKey);
       logger.warn('consent password rejected', { ip: throttleKey });
@@ -421,7 +454,8 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
           clientName: store.getClient(entry.clientId)?.clientName ?? entry.clientId,
           redirectUri: entry.redirectUri,
           resource,
-          scope: entry.scope,
+          scopeOptions: entry.scopeOptions,
+          selected: chosen,
           error: 'Incorrect password.',
         }),
       );
@@ -437,11 +471,11 @@ export function createOAuthRouter(options: OAuthServerOptions): Router {
       codeChallenge: entry.codeChallenge,
       codeChallengeMethod: entry.codeChallengeMethod,
       ...(entry.resource !== undefined ? { resource: entry.resource } : {}),
-      scope: entry.scope,
+      scope: chosen,
       ttlMs: options.authorizationCodeTtlMs,
     });
 
-    logger.info('authorization granted', { clientId: entry.clientId });
+    logger.info('authorization granted', { clientId: entry.clientId, scope: chosen });
 
     const target = new URL(entry.redirectUri);
     target.searchParams.set('code', code);
@@ -599,7 +633,8 @@ function consentPage(input: {
   clientName: string;
   redirectUri: string;
   resource: string;
-  scope: string;
+  scopeOptions: Scope[];
+  selected: Scope;
   error?: string;
 }): string {
   const host = (() => {
@@ -634,21 +669,37 @@ function consentPage(input: {
   button { flex:1; padding:.75rem; font-size:1rem; border-radius:.45rem; border:0; cursor:pointer; }
   .approve { background:#2563eb; color:#fff; }
   .deny { background:transparent; border:1px solid rgba(128,128,128,.5); color:inherit; }
+  fieldset { border:1px solid rgba(128,128,128,.35); border-radius:.6rem; margin:1rem 0; padding:.6rem .9rem; }
+  legend { font-size:.9rem; padding:0 .3rem; }
+  label.opt { display:flex; gap:.6rem; align-items:flex-start; margin:.5rem 0; font-size:.95rem; }
+  label.opt.full strong { color:#b45309; }
+  code { font-size:.8rem; opacity:.8; }
 </style></head>
 <body><main>
   <h1>Authorize access</h1>
-  <p class="muted">A client is asking to control Claude Code on your computer.</p>
+  <p class="muted">A client is asking for access to this server.</p>
   ${input.error ? `<p class="err">${escapeHtml(input.error)}</p>` : ''}
   <div class="box">
     <div class="row"><span>Client</span><strong>${escapeHtml(input.clientName)}</strong></div>
     <div class="row"><span>Redirects to</span><strong>${escapeHtml(host)}</strong></div>
     <div class="row"><span>Resource</span><strong>${escapeHtml(input.resource)}</strong></div>
-    <div class="row"><span>Scope</span><strong>${escapeHtml(input.scope)}</strong></div>
   </div>
-  <p class="warn">Approving lets this client start Claude Code sessions that can read and
-  modify files in your configured project directories. Only approve a client you started yourself.</p>
   <form method="POST" action="/oauth/authorize">
     <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
+    <fieldset>
+      <legend>Permission to grant</legend>
+      ${input.scopeOptions
+        .map((scope) => {
+          const label = describeScope(scope);
+          const checked = scope === input.selected ? ' checked' : '';
+          return `<label class="opt${scope === SCOPE_FULL ? ' full' : ''}"><input type="radio" name="scope" value="${escapeHtml(scope)}"${checked}>
+        <span><strong>${escapeHtml(label.title)}</strong> <code>scope: ${escapeHtml(scope)}</code><br>
+        <span class="muted">${escapeHtml(label.detail)}</span></span></label>`;
+        })
+        .join('\n      ')}
+    </fieldset>
+    <p class="warn">Only approve a client you started yourself, or an agent you set up. Choose
+    <strong>Coordination board only</strong> for any outside agent.</p>
     <label for="password">Password</label>
     <input id="password" name="password" type="password" autocomplete="current-password" autofocus required>
     <div class="actions">

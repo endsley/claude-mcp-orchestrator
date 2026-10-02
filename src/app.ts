@@ -1,5 +1,5 @@
 import { hostname } from 'node:os';
-import { loadConfig, type LoadedConfig } from './config/load.js';
+import { expandPath, loadConfig, type LoadedConfig } from './config/load.js';
 import { ContextAssembler } from './context/assembler.js';
 import { contextAssemblyConfiguration } from './context/config-adapter.js';
 import { registerDefaultProviders } from './context/default-providers.js';
@@ -8,6 +8,9 @@ import { openDatabase, type Db } from './db/database.js';
 import { KvCache } from './db/kvCache.js';
 import { createLogger, type Logger } from './logging/logger.js';
 import { FilesystemScope } from './security/paths.js';
+import { BoardService } from './services/board/board-service.js';
+import { HttpBoardClient, tokenFileReader } from './services/board/http-board-client.js';
+import type { BoardClient } from './services/board/types.js';
 import { Mem0HttpMemoryProvider } from './services/memory/mem0-provider.js';
 import type { MemoryProvider } from './services/memory/types.js';
 import { ProjectRegistry } from './services/projects/project-registry.js';
@@ -59,6 +62,8 @@ export interface BuildApplicationOptions {
   env?: NodeJS.ProcessEnv;
   /** Override the logger, e.g. to silence it in tests. */
   logger?: Logger;
+  /** Override the coordination board client, e.g. with a fake in tests. */
+  boardClient?: BoardClient;
 }
 
 export async function buildApplication(options: BuildApplicationOptions = {}): Promise<Application> {
@@ -165,6 +170,30 @@ export async function buildApplication(options: BuildApplicationOptions = {}): P
   });
   const contextAssembler = new ContextAssembler(registry, contextAssemblyConfiguration(config));
 
+  // ---- coordination board (outside-agent access)
+  const boardClient =
+    options.boardClient ??
+    new HttpBoardClient({
+      nodes: config.board.nodes,
+      readToken: tokenFileReader(
+        config.board.tokenFile !== undefined ? expandPath(config.board.tokenFile, options.cwd ?? process.cwd()) : undefined,
+      ),
+      requestTimeoutMs: config.board.requestTimeoutMs,
+      busyRetries: config.board.busyRetries,
+      downCacheMs: config.board.downCacheMs,
+    });
+  const boardBase = options.cwd ?? process.cwd();
+  const board = new BoardService(
+    boardClient,
+    {
+      ...config.board,
+      projects: Object.fromEntries(
+        Object.entries(config.board.projects).map(([alias, root]) => [alias, expandPath(root, boardBase)]),
+      ),
+    },
+    logger.child({ component: 'board' }),
+  );
+
   const services: Services = {
     config,
     logger,
@@ -179,6 +208,7 @@ export async function buildApplication(options: BuildApplicationOptions = {}): P
     systemStatus,
     contextAssembler,
     contextRegistry: registry,
+    board,
   };
 
   // Reconcile durable state with the fact that no workers survived a restart.

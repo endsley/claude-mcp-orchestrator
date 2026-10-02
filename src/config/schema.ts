@@ -48,8 +48,12 @@ export const authConfigSchema = z.object({
   /** External authorization server issuers, when not using the built-in one. */
   authorizationServers: z.array(z.string().url()).default([]),
   requiredScopes: z.array(z.string()).default([]),
-  /** Scopes advertised in discovery metadata. */
-  scopesSupported: z.array(z.string()).default(['mcp']),
+  /**
+   * Scopes advertised in discovery metadata and grantable at consent. `mcp`
+   * is full access; `board` is the coordination board tools only. A scope
+   * this build does not know grants nothing (see security/scopes.ts).
+   */
+  scopesSupported: z.array(z.string()).default(['mcp', 'board']),
   /**
    * Env var holding the password that gates the OAuth consent screen. This is
    * the single human secret in the flow: it is what proves the browser session
@@ -295,6 +299,40 @@ export const computerMetadataSchema = z.object({
     .optional(),
 });
 
+/**
+ * The network code coordination board this server proxies for outside agents.
+ *
+ * The board's service token lives in a FILE named here (mode 600, outside
+ * Git) and is read at call time, so rotating it needs no restart and it never
+ * appears in config. It is sent only to the node URLs listed here - a "not
+ * leader" redirect to any other URL is ignored rather than followed.
+ */
+export const boardConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** Board nodes in failover order. */
+  nodes: z
+    .array(z.object({ name: z.string().min(1).max(64), url: z.string().url() }))
+    .default([]),
+  /** File holding the board service bearer token. */
+  tokenFile: absolutePath.optional(),
+  /**
+   * Project aliases outside agents may coordinate on, mapped to the project
+   * root the board records. An alias not listed here is refused: outside
+   * callers name a project, they never supply a path.
+   */
+  projects: z.record(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/), absolutePath).prefault({}),
+  /** Per-request timeout for one node. */
+  requestTimeoutMs: z.number().int().min(200).max(60_000).default(5000),
+  /** Retries of a 503 (starting up / fenced) on one node, ~250 ms apart. */
+  busyRetries: z.number().int().min(0).max(10).default(3),
+  /** After every node failed to answer, skip the network for this long. */
+  downCacheMs: z.number().int().min(0).default(15_000),
+  /** Board writes allowed per caller identity per minute. */
+  writesPerMinute: z.number().int().min(1).max(10_000).default(30),
+  /** Board reads allowed per caller identity per minute. */
+  readsPerMinute: z.number().int().min(1).max(10_000).default(120),
+});
+
 export const appConfigSchema = z
   .object({
     server: serverConfigSchema.prefault({}),
@@ -308,6 +346,7 @@ export const appConfigSchema = z
     initialContext: initialContextConfigSchema.prefault({}),
     contextProfiles: z.record(z.string(), contextProfileSchema).prefault({}),
     computers: z.record(z.string(), computerMetadataSchema).prefault({}),
+    board: boardConfigSchema.prefault({}),
   })
   .superRefine((config, ctx) => {
     const loopback = isLoopbackHost(config.server.host);
@@ -377,6 +416,17 @@ export const appConfigSchema = z
       }
     }
 
+    // An enabled board with nowhere to send requests, or no token to send,
+    // would only ever answer BOARD_UNAVAILABLE. Say so at load time instead.
+    if (config.board.enabled) {
+      if (config.board.nodes.length === 0) {
+        ctx.addIssue({ code: 'custom', path: ['board', 'nodes'], message: 'board.enabled requires at least one entry in board.nodes' });
+      }
+      if (config.board.tokenFile === undefined) {
+        ctx.addIssue({ code: 'custom', path: ['board', 'tokenFile'], message: 'board.enabled requires board.tokenFile' });
+      }
+    }
+
     // Only the EXPLICIT choice of mem0-http is an error without a base URL.
     // memory.enabled defaults to true, so making this apply to the default
     // provider as well would refuse to start for every config that omits a
@@ -405,6 +455,7 @@ export type ContextProfile = z.infer<typeof contextProfileSchema>;
 export type ComputerMetadataConfig = z.infer<typeof computerMetadataSchema>;
 export type LoggingConfig = z.infer<typeof loggingConfigSchema>;
 export type DatabaseConfig = z.infer<typeof databaseConfigSchema>;
+export type BoardConfig = z.infer<typeof boardConfigSchema>;
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]', '0:0:0:0:0:0:0:1']);
 

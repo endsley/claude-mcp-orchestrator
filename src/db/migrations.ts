@@ -212,6 +212,28 @@ export const MIGRATIONS: Migration[] = [
       `CREATE INDEX idx_oauth_tokens_parent ON oauth_tokens(parent_token_hash)`,
     ],
   },
+  {
+    version: 5,
+    name: 'board token keys for outside agents',
+    statements: [
+      /*
+       * Long-lived bearer keys that grant the board scope only. Stored hashed,
+       * like OAuth tokens. A revoked row is kept (for the audit trail of who
+       * held a key and when it was last used); the partial unique index lets
+       * a name be reissued after its key is revoked, but never have two live
+       * keys at once.
+       */
+      `CREATE TABLE board_keys (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        key_hash TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT,
+        revoked_at TEXT
+      )`,
+      `CREATE UNIQUE INDEX idx_board_keys_active_name ON board_keys(name) WHERE revoked_at IS NULL`,
+    ],
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;

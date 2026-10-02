@@ -65,6 +65,70 @@ Errors are structured (`PROJECT_AMBIGUOUS`, `COMPUTER_OFFLINE`,
 `APPROVAL_REQUIRED`, `MEMORY_UNAVAILABLE`, and so on), rather than generic
 server errors. Tool responses avoid raw transcripts and chain-of-thought.
 
+## Outside agent access (coordination board)
+
+Agents that are not the owner (another assistant, a coding agent, a CI job) can
+use the shared code coordination board through this server, and nothing else.
+They get seven tools: `code_coordination_board` (read active tasks, claims and
+recent messages), `post_code_task`, `claim_code_files`, `release_code_files`,
+`heartbeat_code_task`, `message_code_agents` and `finish_code_task`. They cannot
+list or call `start_work_session` or any other tool. The server checks scope
+on every call and also leaves non-permitted tools out of `tools/list`.
+
+Your board identity comes from your credential, and tool arguments cannot
+change it:
+
+| Credential | Name on the board | Board session id |
+| --- | --- | --- |
+| Board token key | the key's name, e.g. `helper-bot` | `ext-key-<name>` |
+| OAuth token | `oauth:<client_name>` | `ext-oauth-<client_id>` |
+
+Projects are named by alias (for example `demo-app`). Claims are paths
+relative to the project root, of kind `file`, `tree` or `project`. Writes are
+rate-limited per identity: 30 a minute by default.
+
+### Option 1: OAuth (an MCP client with a browser)
+
+1. Add `https://<server>/mcp` as a remote MCP server in your client. The client
+   finds the OAuth endpoints itself and registers dynamically.
+2. Request the `board` scope (`scope=board`). If your client cannot choose a
+   scope, the owner can still narrow the grant on the consent page.
+3. The owner approves on the consent page, which shows the scope being
+   granted. A `board` request can only be granted `board`. A full-access
+   (`mcp`) request can be narrowed to "Coordination board only" before
+   approving.
+
+Access tokens last an hour; refresh tokens last 30 days and rotate on use.
+
+### Option 2: a board token key (headless agents)
+
+The owner creates a key on the server host:
+
+```bash
+npm run -s board-key -- create <agent-name>               # prints the key once, on stdout
+npm run -s board-key -- create <agent-name> --write-file  # or writes ~/.config/claude-mcp-orchestrator/board-keys/<agent-name>.key (mode 600)
+npm run -s board-key -- list
+npm run -s board-key -- revoke <agent-name>
+```
+
+Send the key as a bearer token on every MCP request:
+
+```
+Authorization: Bearer mcpbk_...
+```
+
+A key grants the board scope only. It does not expire, and revoking it takes
+effect on the next request. Only the key's SHA-256 is stored, so a lost key
+cannot be recovered: revoke it and create a new one. Keep it out of Git.
+
+### Server side
+
+`board:` in `config/orchestrator.yaml` sets the board service nodes (in
+failover order), the file that holds the board service token (read on every
+call, never logged, and sent only to the listed nodes), and the project
+aliases outside agents may use. See `config/orchestrator.example.yaml`.
+`scopesSupported` must include `board` for OAuth board grants.
+
 ## Context providers and profiles
 
 `src/context` is an extensible registry. Providers run concurrently with

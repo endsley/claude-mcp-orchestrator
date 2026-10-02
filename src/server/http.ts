@@ -10,6 +10,17 @@ import { orchestratorError } from '../types/errors.js';
 import { createOAuthRouter } from '../security/oauth/server.js';
 import { OAuthStore } from '../security/oauth/store.js';
 import { audienceMatches, canonicalResource } from '../security/oauth/tokens.js';
+import { BOARD_KEY_PREFIX, BoardKeyStore } from '../security/board-keys.js';
+import {
+  boardKeyPrincipal,
+  localPrincipal,
+  oauthPrincipal,
+  principalFromAuthInfo,
+  principalToAuthInfo,
+  staticBearerPrincipal,
+  type Principal,
+} from '../security/principal.js';
+import { parseScopes, SCOPE_BOARD } from '../security/scopes.js';
 import { assertSafeDeployment, BearerAuthenticator } from './auth.js';
 import type { Services } from './container.js';
 import { createMcpServer } from './mcpServer.js';
@@ -208,7 +219,14 @@ export function createHttpApp(
     );
   }
 
-  const mcpHandler = createMcpHandler(() => createMcpServer(services), {
+  // Board token keys are accepted in every authenticated mode. They grant the
+  // board scope only, whatever else the server is configured for.
+  const boardKeys = new BoardKeyStore(services.db);
+
+  // The principal travels from requireAuth to the per-request server factory
+  // as the SDK's pass-through authInfo; createMcpServer gates tools on it and
+  // registers none when it is missing.
+  const mcpHandler = createMcpHandler((ctx) => createMcpServer(services, principalFromAuthInfo(ctx.authInfo)), {
     onerror: (error: Error) => logger.error('mcp handler error', { err: error }),
   });
   const nodeHandler = toNodeHandler(mcpHandler, {
@@ -250,16 +268,46 @@ export function createHttpApp(
     res.status(401).set('WWW-Authenticate', challenge()).json({ error: 'unauthorized' });
   };
 
+  const bearerOf = (header: string | undefined): string | undefined => {
+    const match = /^Bearer\s+(.+)$/i.exec((header ?? '').trim());
+    return match?.[1];
+  };
+
+  /** Attach the authenticated principal for the MCP handler to pick up. */
+  const admit = (req: Request, principal: Principal, clientId: string, next: NextFunction): void => {
+    (req as Request & { auth?: unknown }).auth = principalToAuthInfo(principal, clientId);
+    next();
+  };
+
+  /**
+   * A presented board key: admitted with the board scope or refused outright.
+   * A token carrying the board-key prefix never falls through to the other
+   * credential checks, so the two kinds cannot be confused for each other.
+   */
+  const admitBoardKey = (req: Request, res: Response, token: string, next: NextFunction): void => {
+    const key = boardKeys.verify(token);
+    if (!key) {
+      unauthorized(res, 'board key unknown or revoked');
+      return;
+    }
+    admit(req, boardKeyPrincipal(key.name, new Set([SCOPE_BOARD])), `board-key:${key.name}`, next);
+  };
+
   const requireAuth = (req: Request, res: Response, next: NextFunction): void => {
     const header = req.headers.authorization;
+    const presented = bearerOf(header);
+
+    if (presented !== undefined && presented.startsWith(BOARD_KEY_PREFIX) && config.server.auth.mode !== 'none') {
+      admitBoardKey(req, res, presented, next);
+      return;
+    }
 
     if (oauth) {
-      const match = /^Bearer\s+(.+)$/i.exec((header ?? '').trim());
-      if (!match?.[1]) {
+      if (!presented) {
         unauthorized(res, 'missing bearer token');
         return;
       }
-      const record = oauth.store.lookupToken(match[1], 'access');
+      const record = oauth.store.lookupToken(presented, 'access');
       if (!record) {
         unauthorized(res, 'access token unknown, expired or revoked');
         return;
@@ -271,7 +319,20 @@ export function createHttpApp(
         unauthorized(res, 'token audience does not match this resource');
         return;
       }
-      next();
+      // Scope is enforced per tool by createMcpServer. A token whose scope
+      // names nothing this build knows is admitted with no scopes and so sees
+      // no tools at all - fail closed, never "default to everything".
+      const client = oauth.store.getClient(record.clientId);
+      admit(
+        req,
+        oauthPrincipal({
+          clientId: record.clientId,
+          ...(client?.clientName !== undefined ? { clientName: client.clientName } : {}),
+          scopes: parseScopes(record.scope),
+        }),
+        record.clientId,
+        next,
+      );
       return;
     }
 
@@ -280,7 +341,7 @@ export function createHttpApp(
       // proven implies a loopback bind. Re-assert it here rather than trusting
       // a caller to have validated the config.
       if (config.server.auth.mode === 'none' && loopbackOnly) {
-        next();
+        admit(req, localPrincipal(), 'local', next);
         return;
       }
       logger.error('refusing request: no authenticator for a non-loopback or non-none configuration');
@@ -290,7 +351,7 @@ export function createHttpApp(
 
     const result = authenticator.verify(header);
     if (result.ok) {
-      next();
+      admit(req, staticBearerPrincipal(), 'static-bearer', next);
       return;
     }
     unauthorized(res, result.reason ?? 'invalid token');

@@ -171,6 +171,16 @@ describe('MCP protocol', () => {
         'respond_to_work_session',
         'send_work_session_instruction',
         'start_work_session',
+        // Coordination board tools (security/scopes.ts BOARD_TOOL_NAMES):
+        // the only tools a board-scoped outside agent can see. They talk to
+        // the board service, never to the filesystem or a shell.
+        'claim_code_files',
+        'code_coordination_board',
+        'finish_code_task',
+        'heartbeat_code_task',
+        'message_code_agents',
+        'post_code_task',
+        'release_code_files',
       ].sort(),
     );
 

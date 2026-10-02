@@ -4,6 +4,7 @@ import type { AppConfig } from '../config/schema.js';
 import type { Db } from '../db/database.js';
 import type { KvCache } from '../db/kvCache.js';
 import type { Logger } from '../logging/logger.js';
+import type { BoardService } from '../services/board/board-service.js';
 import type { MemoryProvider } from '../services/memory/types.js';
 import type { ProjectRegistry } from '../services/projects/project-registry.js';
 import type { ActiveContextStore } from '../services/sessions/activeContext.js';
@@ -32,6 +33,8 @@ export interface Services {
   memory: MemoryProvider;
   systemStatus: SystemStatusService;
   contextAssembler: ContextAssembler;
+  /** The network code coordination board, for board tools. */
+  board: BoardService;
   /** Exposed so diagnostics and tests can introspect registered providers. */
   contextRegistry: ContextProviderRegistry;
 }
