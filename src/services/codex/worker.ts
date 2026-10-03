@@ -3,7 +3,6 @@ import type { Readable } from 'node:stream';
 import type { CodexWorkerConfig } from '../../config/schema.js';
 import type { Logger } from '../../logging/logger.js';
 import { orchestratorError } from '../../types/errors.js';
-import type { WorkSessionMode } from '../../types/sessions.js';
 import { redactText } from '../../security/redaction.js';
 import { isTestCommand, summariseTest } from '../claude/outcomes.js';
 import type {
@@ -50,7 +49,6 @@ export class CodexWorker implements WorkerLike {
   private interrupted = false;
   private started = false;
   private cwd = '';
-  private mode: WorkSessionMode = 'work';
   private codexThreadId?: string;
 
   readonly accumulator: WorkerAccumulator = {
@@ -80,7 +78,6 @@ export class CodexWorker implements WorkerLike {
     if (this.started) throw orchestratorError('INTERNAL', 'Codex worker already started');
     this.started = true;
     this.cwd = options.cwd;
-    this.mode = options.mode;
     this.codexThreadId = options.resumeSessionId;
     this.enqueue(options.instruction);
   }
@@ -210,8 +207,12 @@ export class CodexWorker implements WorkerLike {
     if (this.codexThreadId) {
       args.push('resume', '--json');
     } else {
-      args.push('--json', '--cd', this.cwd, '--sandbox', this.mode === 'work' ? 'workspace-write' : 'read-only');
+      args.push('--json', '--cd', this.cwd);
     }
+    // MCP work sessions are non-interactive. Match Katie's established Codex
+    // automation alias so a delegated job cannot block indefinitely waiting for
+    // a terminal approval nobody can answer through the MCP session protocol.
+    args.push('--dangerously-bypass-approvals-and-sandbox');
     if (this.config.model) args.push('--model', this.config.model);
     if (this.codexThreadId) args.push(this.codexThreadId);
     args.push(instruction);

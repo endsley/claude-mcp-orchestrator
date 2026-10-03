@@ -91,7 +91,8 @@ claude:
   enforceProjectWriteLock: true
 
 # Codex CLI is opt-in. It uses `codex exec --json` and resumes later turns with
-# the durable Codex thread id; it never enables bypass mode or a remote shell.
+# the durable Codex thread id. MCP jobs run unattended with Codex's bypass flag
+# (matching Katie's established Codex automation alias), so use this only for trusted agents.
 codex:
   enabled: false
   # executablePath: /usr/local/bin/codex

@@ -34,7 +34,7 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describe('CodexWorker', () => {
-  it('uses a sandboxed first turn and resumes the durable Codex thread for follow-ups', async () => {
+  it('runs unattended and resumes the durable Codex thread for follow-ups', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'codex-worker-'));
     temporaryDirectories.push(directory);
     const executable = join(directory, 'fake-codex');
@@ -75,9 +75,9 @@ fi
     expect(sessionIds).toEqual(['thread-123']);
     expect(completions).toEqual(['first turn', 'second turn']);
     expect(calls).toContain('exec --json --cd');
-    expect(calls).toContain('--sandbox read-only');
-    expect(calls).toContain('exec resume --json thread-123 second instruction');
-    expect(calls).not.toContain('dangerously-bypass-approvals-and-sandbox');
+    expect(calls).toContain('--dangerously-bypass-approvals-and-sandbox');
+    expect(calls).toContain('exec resume --json --dangerously-bypass-approvals-and-sandbox thread-123 second instruction');
+    expect(calls).not.toContain('--sandbox');
     await worker.dispose();
   });
 });

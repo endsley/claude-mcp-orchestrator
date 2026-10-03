@@ -23,7 +23,8 @@ files · Git · tests · browser · existing Claude MCP integrations
 The phone-side model gets tools such as `start_work_session` and
 `get_environment_context`, not `run_shell`, arbitrary file read/write, Python
 evaluation, sudo, or deployment primitives. The selected agent runs locally. Claude Code uses its normal `user`, `project`, and `local`
-configuration sources; Codex uses its installed CLI configuration and durable thread resume.
+configuration sources; Codex uses its installed CLI configuration and durable thread resume. MCP-launched
+Codex work runs unattended with Codex's bypass flag, matching Katie's established automation policy.
 
 The application binds to `127.0.0.1` by default. It refuses a non-loopback
 bind without authentication and an explicit configuration acknowledgement.
