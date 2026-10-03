@@ -52,6 +52,10 @@ export function registerSessionTools(server: McpServer, services: Services): voi
         'follow-up with send_work_session_instruction instead.',
       inputSchema: z.object({
         instruction: z.string().min(1).describe('What the user wants done, in their own words.'),
+        agent: z
+          .enum(['claude', 'codex'])
+          .optional()
+          .describe('Coding agent to launch. Defaults to Claude Code; use codex to launch the local Codex CLI.'),
         project: z.string().optional().describe('Project name, alias or path.'),
         computer: z.string().optional().describe('Computer name or alias. Defaults to this machine.'),
         mode: z
@@ -64,6 +68,7 @@ export function registerSessionTools(server: McpServer, services: Services): voi
     guarded('start_work_session', logger, async (args) => {
       const output = await sessions.startSession({
         instruction: args.instruction,
+        ...(args.agent !== undefined ? { agent: args.agent } : {}),
         ...(args.project !== undefined ? { project: args.project } : {}),
         ...(args.computer !== undefined ? { computer: args.computer } : {}),
         ...(args.mode !== undefined ? { mode: args.mode } : {}),
@@ -106,7 +111,7 @@ export function registerSessionTools(server: McpServer, services: Services): voi
       title: 'Continue a work session',
       description:
         'Alias of send_work_session_instruction, for when the user explicitly asks to continue earlier ' +
-        'work. Preserves the existing Claude Code conversation.',
+        'work. Preserves the existing worker conversation.',
       inputSchema: z.object({
         sessionId: z.string().optional(),
         instruction: z.string().min(1),

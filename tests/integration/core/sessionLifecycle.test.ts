@@ -9,6 +9,7 @@ import { SessionManager, type ComputerLookup, type ProjectLookup } from '../../.
 import { PendingRequestBroker } from '../../../src/services/sessions/pendingRequestBroker.js';
 import { WorkSessionStore } from '../../../src/services/sessions/sessionStore.js';
 import { OrchestratorError } from '../../../src/types/errors.js';
+import type { WorkSessionProvider } from '../../../src/types/sessions.js';
 
 /**
  * Lifecycle behaviour driven by a controllable fake worker.
@@ -95,12 +96,14 @@ let db: Db;
 let store: WorkSessionStore;
 let manager: SessionManager;
 let workers: FakeWorker[];
+let requestedProviders: WorkSessionProvider[];
 
-function build(): void {
+function build(options: { codexEnabled?: boolean } = {}): void {
   db = openTestDatabase(createNullLogger());
   store = new WorkSessionStore(db, 100);
   workers = [];
-  const config = appConfigSchema.parse({});
+  requestedProviders = [];
+  const config = appConfigSchema.parse({ codex: { enabled: options.codexEnabled ?? false } });
   manager = new SessionManager({
     store,
     broker: new PendingRequestBroker(store),
@@ -115,9 +118,11 @@ function build(): void {
       allowOutsideProjectWrite: false,
     }),
     claudeConfig: config.claude,
+    codexConfig: config.codex,
     securityConfig: { ...config.security, pendingRequestTimeoutMs: 1000 },
     logger: createNullLogger(),
-    createWorker: ({ callbacks }) => {
+    createWorker: ({ callbacks, provider }) => {
+      requestedProviders.push(provider);
       const worker = new FakeWorker(callbacks);
       workers.push(worker);
       return worker;
@@ -141,6 +146,23 @@ describe('starting work', () => {
     expect(prompt).toContain('Fix the nav');
     expect(prompt).toContain('ask_user');
     expect(prompt.length).toBeLessThan(1000);
+  });
+
+  it('refuses Codex when the local Codex worker is disabled', async () => {
+    await expect(manager.startSession({ instruction: 'Inspect the nav', project: 'demo', agent: 'codex', mode: 'inspect' })).rejects.toMatchObject({
+      code: 'CODEX_WORKER_UNAVAILABLE',
+    });
+    expect(workers).toHaveLength(0);
+  });
+
+  it('starts a durable Codex session when the local worker is enabled', async () => {
+    build({ codexEnabled: true });
+    const output = await manager.startSession({ instruction: 'Inspect the nav', project: 'demo', agent: 'codex', mode: 'inspect' });
+
+    expect(output.agent).toBe('codex');
+    expect(requestedProviders).toEqual(['codex']);
+    expect(store.getOrThrow(output.sessionId).provider).toBe('codex');
+    expect(manager.getStatus(output.sessionId).provider).toBe('codex');
   });
 
   it('refuses a second write session on the same project', async () => {

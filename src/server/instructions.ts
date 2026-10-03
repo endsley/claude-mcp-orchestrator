@@ -7,7 +7,7 @@
  */
 export const SERVER_INSTRUCTIONS = `
 This server connects you to the user's Linux computer, their other machines, their
-development projects, and a Claude Code worker that does real work on their behalf.
+development projects, and Claude Code or Codex workers that do real work on their behalf.
 
 When the conversation touches the user's computers, development environment, projects,
 current work, servers, or uses an ambiguous reference such as "my server", "the GPU
@@ -19,10 +19,10 @@ Resolving names: do not guess which computer or project the user means. find_pro
 get_computer resolve spoken names and aliases, and will tell you when a phrase is
 ambiguous rather than picking one. Read the candidates back to the user.
 
-Doing work: start_work_session hands a task to Claude Code on the user's computer and
-returns immediately with a session id. The work continues in the background. Use
-get_work_session_status to report progress and get_work_session_result for what actually
-changed.
+Doing work: start_work_session hands a task to Claude Code by default, or to Codex when
+agent is "codex", on the user's computer and returns immediately with a session id. The work
+continues in the background. Use get_work_session_status to report progress and
+get_work_session_result for what actually changed.
 
 Continuing work: when the user's wording is a follow-up to earlier work ("make it smaller",
 "don't touch the backend", "run the tests now"), send it to the existing session with
@@ -40,7 +40,7 @@ or history, why something was built a certain way, a past decision, a person, a
 service, or an unfamiliar name. Prefer recalling over asking the user to re-explain
 something they have already told the system.
 
-Operating rules: the environment context includes the user's standing Claude Code
+Operating rules: the environment context includes the user's standing coding-agent
 rules, and the computer-side worker is bound by them. Respect them when delegating -
 do not ask the worker to do something the rules forbid.
 

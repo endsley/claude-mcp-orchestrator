@@ -35,6 +35,10 @@ export function isTerminalStatus(status: WorkSessionStatus): boolean {
 
 export type WorkSessionMode = 'work' | 'plan' | 'inspect';
 
+/** Coding provider selected at session start. */
+export const WORK_SESSION_PROVIDERS = ['claude', 'codex'] as const;
+export type WorkSessionProvider = (typeof WORK_SESSION_PROVIDERS)[number];
+
 export type PendingRequestType = 'question' | 'approval';
 
 export interface PendingRequest {
@@ -147,7 +151,14 @@ export interface WorkSessionError {
 
 export interface WorkSession {
   id: string;
-  /** Claude Agent SDK session ID, once the worker reports one. */
+  /** Worker selected when this durable session was created. */
+  provider: WorkSessionProvider;
+  /**
+   * Opaque provider conversation ID, once the worker reports one.
+   *
+   * The historical SQLite column remains `claude_session_id`; it stores a
+   * Claude session id or Codex thread id according to `provider`.
+   */
   claudeSessionId?: string;
   projectId?: string;
   computerId?: string;
@@ -177,6 +188,7 @@ export interface WorkSession {
 /** Voice-optimised status payload returned by get_work_session_status. */
 export interface WorkSessionStatusView {
   sessionId: string;
+  provider: WorkSessionProvider;
   status: WorkSessionStatus;
   summary: string;
   currentStep?: string;

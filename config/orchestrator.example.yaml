@@ -90,6 +90,14 @@ claude:
   # One write-capable session per project. Read-only sessions stay concurrent.
   enforceProjectWriteLock: true
 
+# Codex CLI is opt-in. It uses `codex exec --json` and resumes later turns with
+# the durable Codex thread id; it never enables bypass mode or a remote shell.
+codex:
+  enabled: false
+  # executablePath: /usr/local/bin/codex
+  # model: gpt-5-codex
+  sessionTimeoutMs: 7200000
+
 tailscale:
   enabled: true
   executablePath: tailscale

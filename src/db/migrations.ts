@@ -234,6 +234,17 @@ export const MIGRATIONS: Migration[] = [
       `CREATE UNIQUE INDEX idx_board_keys_active_name ON board_keys(name) WHERE revoked_at IS NULL`,
     ],
   },
+  {
+    version: 6,
+    name: 'record work-session provider',
+    statements: [
+      // Existing durable sessions were all Claude Code sessions. The opaque
+      // external id remains in its historical column for backwards
+      // compatibility; provider tells recovery which CLI owns it.
+      `ALTER TABLE work_sessions ADD COLUMN provider TEXT NOT NULL DEFAULT 'claude'`,
+      `CREATE INDEX idx_work_sessions_provider ON work_sessions(provider)`,
+    ],
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;

@@ -12,6 +12,7 @@ import type {
   WorkSession,
   WorkSessionError,
   WorkSessionMode,
+  WorkSessionProvider,
   WorkSessionStatus,
 } from '../../types/sessions.js';
 import { assertTransition } from './stateMachine.js';
@@ -19,6 +20,7 @@ import { assertTransition } from './stateMachine.js';
 interface WorkSessionRow {
   id: string;
   claude_session_id: string | null;
+  provider: string | null;
   project_id: string | null;
   computer_id: string | null;
   mode: string;
@@ -67,6 +69,7 @@ function parseJson<T>(value: string | null, fallback: T): T {
 function rowToSession(row: WorkSessionRow): WorkSession {
   const session: WorkSession = {
     id: row.id,
+    provider: row.provider === 'codex' ? 'codex' : 'claude',
     mode: row.mode as WorkSessionMode,
     writeCapable: row.write_capable === 1,
     status: row.status as WorkSessionStatus,
@@ -118,6 +121,8 @@ function rowToPendingRequest(row: PendingRequestRow): PendingRequest {
 
 export interface CreateWorkSessionInput {
   instruction: string;
+  /** Omitted by legacy callers; all pre-Codex sessions are Claude. */
+  provider?: WorkSessionProvider;
   mode: WorkSessionMode;
   writeCapable: boolean;
   projectId?: string;
@@ -157,12 +162,13 @@ export class WorkSessionStore {
     this.db
       .prepare(
         `INSERT INTO work_sessions
-           (id, project_id, computer_id, mode, write_capable, status, initial_instruction,
+           (id, provider, project_id, computer_id, mode, write_capable, status, initial_instruction,
             created_at, updated_at, recovery_count, turn_count)
-         VALUES (?, ?, ?, ?, ?, 'starting', ?, ?, ?, 0, 0)`,
+         VALUES (?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, 0, 0)`,
       )
       .run(
         id,
+        input.provider ?? 'claude',
         input.projectId ?? null,
         input.computerId ?? null,
         input.mode,

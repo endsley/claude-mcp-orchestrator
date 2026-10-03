@@ -91,6 +91,23 @@ async function main(): Promise<void> {
     );
   }
 
+  // ---- Codex CLI
+  if (!config.codex.enabled) {
+    record('codex', 'WARNING', 'disabled in configuration; start_work_session agent "codex" is unavailable');
+  } else {
+    const codexPath = config.codex.executablePath;
+    try {
+      const { stdout } = await run(codexPath ?? 'codex', ['--version'], { timeout: 10_000 });
+      record('codex', 'OK', stdout.trim());
+    } catch {
+      record(
+        'codex',
+        'ERROR',
+        `could not run "${codexPath ?? 'codex'} --version"; set codex.executablePath or disable codex in config`,
+      );
+    }
+  }
+
   // ---- Tailscale
   if (!config.tailscale.enabled) {
     record('tailscale', 'WARNING', 'disabled in configuration; machine awareness is off');

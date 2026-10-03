@@ -1,4 +1,4 @@
-import type { ClaudeWorkerConfig, SecurityConfig } from '../../config/schema.js';
+import type { ClaudeWorkerConfig, CodexWorkerConfig, SecurityConfig } from '../../config/schema.js';
 import type { InitialContextSection } from '../../types/context.js';
 import type { Logger } from '../../logging/logger.js';
 import type { FilesystemScope } from '../../security/paths.js';
@@ -9,9 +9,11 @@ import {
   type WorkResult,
   type WorkSession,
   type WorkSessionMode,
+  type WorkSessionProvider,
   type WorkSessionStatusView,
 } from '../../types/sessions.js';
 import { ClaudeWorker, type WorkerCallbacks, type WorkerLike, type WorkerProgress } from '../claude/worker.js';
+import { CodexWorker } from '../codex/worker.js';
 import { type ActiveContextStore } from './activeContext.js';
 import { type PendingRequestBroker } from './pendingRequestBroker.js';
 import { acceptsInstruction } from './stateMachine.js';
@@ -39,6 +41,8 @@ export interface ComputerLookup {
 
 export interface StartSessionInput {
   instruction: string;
+  /** Coding provider. Defaults to Claude Code for compatibility. */
+  agent?: WorkSessionProvider;
   project?: string;
   computer?: string;
   mode?: WorkSessionMode;
@@ -50,6 +54,7 @@ export interface StartSessionOutput {
   sessionId: string;
   status: WorkSession['status'];
   summary: string;
+  agent: WorkSessionProvider;
   project?: string;
   computer?: string;
   warnings: string[];
@@ -63,6 +68,8 @@ export interface SessionManagerDeps {
   computers: ComputerLookup;
   scope: FilesystemScope;
   claudeConfig: ClaudeWorkerConfig;
+  /** Optional in older deterministic tests; production always passes it. */
+  codexConfig?: CodexWorkerConfig;
   securityConfig: SecurityConfig;
   logger: Logger;
   /** Overridable so tests can inject a fake worker. */
@@ -71,7 +78,9 @@ export interface SessionManagerDeps {
 
 export interface WorkerFactoryArgs {
   workSessionId: string;
+  provider: WorkSessionProvider;
   config: ClaudeWorkerConfig;
+  codexConfig?: CodexWorkerConfig;
   scope: FilesystemScope;
   policy: (cls: PermissionClass) => PermissionAction;
   callbacks: WorkerCallbacks;
@@ -128,6 +137,8 @@ export class SessionManager {
   async startSession(input: StartSessionInput): Promise<StartSessionOutput> {
     const warnings: string[] = [];
     const mode: WorkSessionMode = input.mode ?? 'work';
+    const provider = input.agent ?? 'claude';
+    this.assertProviderAvailable(provider);
     const writeCapable = mode === 'work';
 
     const computer = await this.resolveComputer(input.computer);
@@ -146,6 +157,7 @@ export class SessionManager {
     // does not leave an orphan row behind.
     const session = this.store.create({
       instruction: input.instruction,
+      provider,
       mode,
       writeCapable,
       ...(project ? { projectId: project.id } : {}),
@@ -193,10 +205,10 @@ export class SessionManager {
     }
 
     const cwd = project?.path ?? process.cwd();
-    const worker = this.buildWorker(session.id, cwd);
+    const worker = this.buildWorker(session.id, cwd, provider);
     this.workers.set(session.id, worker);
 
-    const prompt = this.composePrompt(input.instruction, input.context, mode);
+    const prompt = this.composePrompt(input.instruction, input.context, mode, provider);
 
     try {
       worker.start({ instruction: prompt, cwd, mode });
@@ -217,6 +229,7 @@ export class SessionManager {
       sessionId: session.id,
       status: 'working',
       summary: `Started work on ${project?.displayName ?? 'this machine'}: ${firstLine(input.instruction)}`,
+      agent: provider,
       ...(project ? { project: project.displayName } : {}),
       ...(computer ? { computer: computer.displayName } : {}),
       warnings,
@@ -230,15 +243,27 @@ export class SessionManager {
    * settings through `settingSources`, so repeating preferences here would
    * create a second, drifting source of truth.
    */
-  private composePrompt(instruction: string, context: string | undefined, mode: WorkSessionMode): string {
+  private composePrompt(
+    instruction: string,
+    context: string | undefined,
+    mode: WorkSessionMode,
+    provider: WorkSessionProvider,
+  ): string {
     const parts: string[] = [];
     if (mode === 'inspect') {
       parts.push('Investigate and report only. Do not modify any files.');
     }
-    parts.push(
-      'You are being driven by a user speaking to Claude on their phone. Keep replies short and ' +
-        'concrete. When a decision genuinely needs the user, call the ask_user tool rather than guessing.',
-    );
+    if (provider === 'claude') {
+      parts.push(
+        'You are being driven by a user speaking to Claude on their phone. Keep replies short and ' +
+          'concrete. When a decision genuinely needs the user, call the ask_user tool rather than guessing.',
+      );
+    } else {
+      parts.push(
+        'You are being driven by a user speaking to Claude on their phone. Keep replies short and ' +
+          'concrete. If a decision genuinely needs the user, state the question in your final response rather than guessing.',
+      );
+    }
     if (context && context.trim() !== '') parts.push(`Relevant context:\n${context.trim()}`);
     parts.push(instruction);
     return parts.join('\n\n');
@@ -365,6 +390,7 @@ export class SessionManager {
 
     const view: WorkSessionStatusView = {
       sessionId,
+      provider: session.provider,
       status: session.status,
       summary: session.currentSummary ?? firstLine(session.initialInstruction),
       completedSteps,
@@ -446,7 +472,7 @@ export class SessionManager {
           : session.status === 'interrupted'
             ? 'interrupted, can be resumed'
             : session.status;
-      lines.push(`${session.id} — ${session.currentSummary ?? firstLine(session.initialInstruction)} [${label}]`);
+      lines.push(`${session.id} (${session.provider}) — ${session.currentSummary ?? firstLine(session.initialInstruction)} [${label}]`);
       if (session.currentStep) lines.push(`  now: ${session.currentStep}`);
       if (open) lines.push(`  waiting on you: ${open.question}`);
     }
@@ -459,11 +485,11 @@ export class SessionManager {
       return {
         providerId: 'workSessions',
         title: 'RECENT WORK',
-        lines: [`${last.id} — ${last.currentSummary ?? firstLine(last.initialInstruction)} [${last.status}]`],
+        lines: [`${last.id} (${last.provider}) — ${last.currentSummary ?? firstLine(last.initialInstruction)} [${last.status}]`],
         minLines: 1,
         relevance: 0.2,
         generatedAt: new Date().toISOString(),
-        data: { sessions: [{ id: last.id, status: last.status, summary: last.currentSummary ?? null }] },
+        data: { sessions: [{ id: last.id, provider: last.provider, status: last.status, summary: last.currentSummary ?? null }] },
       };
     }
 
@@ -475,7 +501,7 @@ export class SessionManager {
       relevance: 1,
       generatedAt: new Date().toISOString(),
       data: {
-        sessions: shown.map((s) => ({ id: s.id, status: s.status, summary: s.currentSummary ?? null })),
+        sessions: shown.map((s) => ({ id: s.id, provider: s.provider, status: s.status, summary: s.currentSummary ?? null })),
       },
     };
   }
@@ -528,11 +554,11 @@ export class SessionManager {
     const startedAt = Date.parse(session.startedAt ?? session.createdAt);
     // An unparseable timestamp is never treated as expired.
     if (!Number.isFinite(startedAt)) return false;
-    return Date.now() - startedAt > this.deps.claudeConfig.sessionTimeoutMs;
+    return Date.now() - startedAt > this.sessionTimeoutMs(session.provider);
   }
 
   private remainingLifetimeNote(session: WorkSession): string | undefined {
-    const cap = this.deps.claudeConfig.sessionTimeoutMs;
+    const cap = this.sessionTimeoutMs(session.provider);
     const startedAt = Date.parse(session.startedAt ?? session.createdAt);
     if (!Number.isFinite(startedAt)) return undefined;
     const remainingMs = cap - (Date.now() - startedAt);
@@ -540,6 +566,24 @@ export class SessionManager {
     if (remainingMs <= 0) return undefined;
     if (remainingMs > 10 * 60_000) return undefined;
     return `Only about ${Math.max(1, Math.round(remainingMs / 60_000))} minute(s) remain before this session reaches its wall-clock cap.`;
+  }
+
+  private sessionTimeoutMs(provider: WorkSessionProvider): number {
+    return provider === 'codex' ? this.codexConfig().sessionTimeoutMs : this.deps.claudeConfig.sessionTimeoutMs;
+  }
+
+  private codexConfig(): CodexWorkerConfig {
+    return this.deps.codexConfig ?? { enabled: false, sessionTimeoutMs: 7_200_000 };
+  }
+
+  private assertProviderAvailable(provider: WorkSessionProvider): void {
+    if (provider === 'codex' && !this.codexConfig().enabled) {
+      throw orchestratorError(
+        'CODEX_WORKER_UNAVAILABLE',
+        'Codex work sessions are disabled on this server.',
+        { hint: 'Start the session with agent "claude", or enable the codex worker in the server configuration.' },
+      );
+    }
   }
 
   /**
@@ -609,7 +653,8 @@ export class SessionManager {
     }
 
     const cwd = project?.path ?? process.cwd();
-    const worker = this.buildWorker(session.id, cwd);
+    this.assertProviderAvailable(session.provider);
+    const worker = this.buildWorker(session.id, cwd, session.provider);
     this.workers.set(session.id, worker);
 
     const canResume = session.claudeSessionId !== undefined;
@@ -624,14 +669,16 @@ export class SessionManager {
       });
     } catch (error) {
       this.workers.delete(session.id);
-      throw orchestratorError('CLAUDE_SESSION_RESUME_FAILED', `could not resume work session ${session.id}`, {
-        cause: error,
-        details: { sessionId: session.id },
-      });
+      throw orchestratorError(
+        session.provider === 'codex' ? 'CODEX_SESSION_RESUME_FAILED' : 'CLAUDE_SESSION_RESUME_FAILED',
+        `could not resume work session ${session.id}`,
+        { cause: error, details: { sessionId: session.id, provider: session.provider } },
+      );
     }
 
+    const providerSession = session.provider === 'codex' ? 'Codex thread' : 'Claude session';
     const base = canResume
-      ? 'Worker restarted and resumed the previous Claude session.'
+      ? `Worker restarted and resumed the previous ${providerSession}.`
       : 'Worker restarted from a summary; earlier conversation detail was not recovered.';
     // The cap counts from the ORIGINAL start and is not reset by a resume, so
     // resuming a long-lived session can hand back a worker the reaper retires
@@ -693,10 +740,12 @@ export class SessionManager {
 
   // ---------------------------------------------------------------- workers
 
-  private buildWorker(sessionId: string, _cwd: string): WorkerLike {
+  private buildWorker(sessionId: string, _cwd: string, provider: WorkSessionProvider): WorkerLike {
     const callbacks: WorkerCallbacks = {
-      onSessionId: (claudeSessionId) => {
-        this.store.setClaudeSessionId(sessionId, claudeSessionId);
+      // The durable column keeps its historical name for migration compatibility;
+      // it stores a Claude session ID or Codex thread ID according to provider.
+      onSessionId: (providerSessionId) => {
+        this.store.setClaudeSessionId(sessionId, providerSessionId);
       },
       onProgress: (progress: WorkerProgress) => {
         this.store.appendProgress(
@@ -753,12 +802,18 @@ export class SessionManager {
     if (this.deps.createWorker) {
       return this.deps.createWorker({
         workSessionId: sessionId,
+        provider,
         config: this.deps.claudeConfig,
+        codexConfig: this.codexConfig(),
         scope: this.deps.scope,
         policy: this.policy(),
         callbacks,
         logger: this.logger,
       });
+    }
+
+    if (provider === 'codex') {
+      return new CodexWorker(sessionId, this.codexConfig(), callbacks, this.logger);
     }
 
     return new ClaudeWorker(
@@ -835,7 +890,10 @@ export class SessionManager {
 
     const orchestratorErr = OrchestratorError.is(error)
       ? error
-      : orchestratorError('CLAUDE_WORKER_FAILED', error instanceof Error ? error.message : String(error));
+      : orchestratorError(
+          session.provider === 'codex' ? 'CODEX_WORKER_FAILED' : 'CLAUDE_WORKER_FAILED',
+          error instanceof Error ? error.message : String(error),
+        );
 
     this.store.setStatus(sessionId, 'failed', {
       summary: `Work failed: ${orchestratorErr.message}`,
@@ -902,7 +960,6 @@ export class SessionManager {
    * against a clock instead of a timer.
    */
   reapExpiredSessions(nowMs: number = Date.now()): string[] {
-    const cap = this.deps.claudeConfig.sessionTimeoutMs;
     const reaped: string[] = [];
     // `interrupted` is included deliberately. Recovery marks a session
     // interrupted and lets it KEEP its write lock so it can be resumed, but
@@ -915,6 +972,7 @@ export class SessionManager {
       const startedAt = Date.parse(session.startedAt ?? session.createdAt);
       // An unparseable timestamp is not a reason to kill someone's work.
       if (!Number.isFinite(startedAt)) continue;
+      const cap = this.sessionTimeoutMs(session.provider);
       if (nowMs - startedAt <= cap) continue;
       // Its own code, and NOT attributed to the worker: nothing the worker
       // did caused this, and SESSION_ALREADY_FINISHED means something else.

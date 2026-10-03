@@ -1,7 +1,7 @@
 # Claude MCP Orchestrator
 
 An MCP orchestration service that lets Claude on Android—particularly the live
-voice interface—use Claude Code on a Linux workstation without being handed
+voice interface—use Claude Code or Codex on a Linux workstation without being handed
 primitive machine-control tools. It is an **intent, context, session, and
 policy layer**, not a remote shell.
 
@@ -13,7 +13,7 @@ Claude MCP Orchestrator
   ├─ context-provider registry ── Tailscale / projects / Mem0 / system state
   ├─ SQLite ── durable work sessions, progress, pending questions/results
   ├─ policy ── scope, approvals, redaction, authentication
-  └─ Claude Agent worker ── existing Claude Code configuration and local tools
+  └─ Claude Agent / Codex worker ── existing local agent configuration and tools
           ▼
 files · Git · tests · browser · existing Claude MCP integrations
 ```
@@ -22,9 +22,8 @@ files · Git · tests · browser · existing Claude MCP integrations
 
 The phone-side model gets tools such as `start_work_session` and
 `get_environment_context`, not `run_shell`, arbitrary file read/write, Python
-evaluation, sudo, or deployment primitives. Claude Code runs locally under its
-normal `user`, `project`, and `local` configuration sources, including existing
-`CLAUDE.md`, `.claude`, rules, skills, settings, and project MCP configuration.
+evaluation, sudo, or deployment primitives. The selected agent runs locally. Claude Code uses its normal `user`, `project`, and `local`
+configuration sources; Codex uses its installed CLI configuration and durable thread resume.
 
 The application binds to `127.0.0.1` by default. It refuses a non-loopback
 bind without authentication and an explicit configuration acknowledgement.
@@ -297,8 +296,8 @@ systemctl --user enable --now claude-mcp-orchestrator
 systemctl --user status claude-mcp-orchestrator
 ```
 
-The unit sets `HOME` and a PATH containing `~/.local/bin` so Claude Code can
-load its existing authentication and configuration. It is not installed
+The unit sets `HOME` and a PATH containing `~/.local/bin` so Claude Code and Codex can
+load their existing authentication and configuration. It is not installed
 automatically and does not alter a firewall, proxy, tunnel, or Tailscale ACL.
 
 ## Android Claude connector setup

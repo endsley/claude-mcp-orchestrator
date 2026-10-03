@@ -152,6 +152,7 @@ export async function buildApplication(options: BuildApplicationOptions = {}): P
     computers,
     scope,
     claudeConfig: config.claude,
+    codexConfig: config.codex,
     securityConfig: config.security,
     logger,
   });

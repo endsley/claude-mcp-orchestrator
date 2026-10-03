@@ -180,6 +180,20 @@ export const claudeWorkerConfigSchema = z.object({
   enforceProjectWriteLock: z.boolean().default(true),
 });
 
+/**
+ * Codex is opt-in for a fresh installation. Unlike the Claude Agent SDK, its
+ * non-interactive CLI cannot hand a tool approval back to this MCP server.
+ */
+export const codexWorkerConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** Explicit path to `codex`; PATH is used when this is omitted. */
+  executablePath: z.string().optional(),
+  /** Optional provider-model override. Omit to honour Codex's own config. */
+  model: z.string().optional(),
+  /** Wall-clock cap for one durable work session. */
+  sessionTimeoutMs: z.number().int().min(60_000).default(7_200_000),
+});
+
 export const providerConfigSchema = z.object({
   enabled: z.boolean().optional(),
   priority: z.number().optional(),
@@ -340,6 +354,7 @@ export const appConfigSchema = z
     database: databaseConfigSchema.prefault({}),
     security: securityConfigSchema.prefault({}),
     claude: claudeWorkerConfigSchema.prefault({}),
+    codex: codexWorkerConfigSchema.prefault({}),
     tailscale: tailscaleConfigSchema.prefault({}),
     projects: projectsConfigSchema.prefault({}),
     memory: memoryConfigSchema.prefault({}),
@@ -446,6 +461,7 @@ export type ServerConfig = z.infer<typeof serverConfigSchema>;
 export type AuthConfig = z.infer<typeof authConfigSchema>;
 export type SecurityConfig = z.infer<typeof securityConfigSchema>;
 export type ClaudeWorkerConfig = z.infer<typeof claudeWorkerConfigSchema>;
+export type CodexWorkerConfig = z.infer<typeof codexWorkerConfigSchema>;
 export type ProjectsConfig = z.infer<typeof projectsConfigSchema>;
 export type MemoryConfig = z.infer<typeof memoryConfigSchema>;
 export type TailscaleConfig = z.infer<typeof tailscaleConfigSchema>;
