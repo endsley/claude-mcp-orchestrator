@@ -34,6 +34,7 @@ export const BOARD_TOOL_NAMES: ReadonlySet<string> = new Set([
   'coord_attention',
   'coord_ack',
   'coord_read',
+  'coord_project_list',
   'coord_project_show',
   'coord_job_take',
   'coord_job_update',

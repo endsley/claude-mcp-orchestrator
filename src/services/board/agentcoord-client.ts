@@ -35,6 +35,7 @@ export const AGENTCOORD_OPS = [
   'attention',
   'ack',
   'read',
+  'project_list',
   'project_show',
   'job_take',
   'job_update',
@@ -52,6 +53,7 @@ export const AGENTCOORD_READ_OPS: ReadonlySet<AgentcoordOp> = new Set([
   'file_board',
   'attention',
   'read',
+  'project_list',
   'project_show',
   'my_jobs',
 ]);

@@ -408,6 +408,29 @@ export class AgentcoordBoardService {
     return publicMessage(await this.run(principal, 'read', { id: input.id }));
   }
 
+  /**
+   * The reachable projects, with progress counts and whether each is a vision
+   * swarm (its vision starts with "VISION SWARM"). Only allowlisted projects
+   * are returned; the rest of the board's projects stay invisible.
+   */
+  async projectList(principal: Principal, input: { swarmsOnly?: boolean; includeDone?: boolean } = {}): Promise<JsonObject> {
+    const payload: JsonObject = {};
+    if (input.includeDone === true) payload['include_done'] = true;
+    const result = await this.run(principal, 'project_list', payload);
+    const projects = asArray(result['projects'])
+      .map(asObject)
+      .filter((row) => typeof row['name'] === 'string' && this.allowed.has(row['name'] as string))
+      .map((row) => {
+        const vision = typeof row['vision'] === 'string' ? (row['vision'] as string) : '';
+        const out: JsonObject = pick(row, ['name', 'repo', 'status', 'done', 'open', 'in_progress', 'blocked', 'updated_at']);
+        out['swarm'] = vision.trimStart().toUpperCase().startsWith('VISION SWARM');
+        out['vision_preview'] = vision.slice(0, 200);
+        return out;
+      })
+      .filter((row) => input.swarmsOnly !== true || row['swarm'] === true);
+    return { projects };
+  }
+
   async projectShow(principal: Principal, input: { project: string; includeDone?: boolean }): Promise<JsonObject> {
     const project = this.requireProject(input.project);
     const result = await this.run(principal, 'project_show', { project });

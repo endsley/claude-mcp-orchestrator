@@ -187,6 +187,7 @@ describe('MCP protocol', () => {
         'coord_job_take',
         'coord_job_update',
         'coord_my_jobs',
+        'coord_project_list',
         'coord_project_show',
         'coord_read',
       ].sort(),

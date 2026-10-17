@@ -111,6 +111,14 @@ export class FakeAgentcoord implements AgentcoordTransport {
         return { acknowledged: payload['ids'] ?? [] };
       case 'read':
         return { id: payload['id'] ?? null, sender: 'katie/claude-ui', kind: 'discussion', body: 'full text', payload: { x: 1 }, audience: { to: [agent] } };
+      case 'project_list':
+        return {
+          projects: [
+            { name: 'oakhaven', repo: 'endsley/iamar', status: 'active', vision: 'VISION SWARM: city', done: 3, open: 2, in_progress: 1, blocked: 0, agents: ['katie/x'] },
+            { name: 'plain-plan', status: 'active', vision: 'not a swarm', done: 0, open: 1 },
+            { name: 'secret-repo', status: 'active', vision: 'VISION SWARM: hidden', done: 0, open: 9 },
+          ],
+        };
       case 'project_show':
         return {
           project: { name: payload['project'] ?? null, repo: 'endsley/iamar', vision: 'v', status: 'active', updated_by: 'katie/claude' },

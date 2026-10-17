@@ -220,6 +220,28 @@ export function agentcoordBoardTools(services: Services, principal: Principal): 
       },
     }),
     defineBoardTool({
+      name: 'coord_project_list',
+      title: 'List projects and vision swarms',
+      description:
+        'List the coordination projects you can reach, with job counts, and which are vision swarms ' +
+        '(shared projects every agent works on). Start here, then read one with coord_project_show.',
+      inputSchema: z.object({
+        swarms_only: z.boolean().optional().describe('Only vision swarms.'),
+        include_done: z.boolean().optional().describe('Also list finished projects.'),
+      }),
+      run: async (args) => {
+        const result = await coord.projectList(principal, {
+          ...(args.swarms_only !== undefined ? { swarmsOnly: args.swarms_only } : {}),
+          ...(args.include_done !== undefined ? { includeDone: args.include_done } : {}),
+        });
+        const rows = list(result['projects']).map((row) => (typeof row === 'object' && row !== null && !Array.isArray(row) ? row : {}) as JsonObject);
+        const lines = rows.map((row) =>
+          `- ${String(row['name'])}${row['swarm'] === true ? ' [swarm]' : ''} [${String(row['status'] ?? '?')}]: ` +
+          `${String(row['open'] ?? 0)} open, ${String(row['done'] ?? 0)} done`);
+        return { text: [`${rows.length} project(s) you can reach:`, ...lines].join('\n'), structured: result };
+      },
+    }),
+    defineBoardTool({
       name: 'coord_project_show',
       title: 'Show a project plan',
       description:

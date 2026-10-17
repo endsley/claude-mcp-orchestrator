@@ -6,6 +6,7 @@ import { parseScopes } from '../../../src/security/scopes.js';
 import { AgentcoordRemoteError } from '../../../src/services/board/agentcoord-client.js';
 import { AgentcoordBoardService } from '../../../src/services/board/agentcoord-service.js';
 import { OrchestratorError } from '../../../src/types/errors.js';
+import type { JsonObject } from '../../../src/types/json.js';
 import { FakeAgentcoord } from '../../fakes/fake-agentcoord.js';
 
 const MUSE_TOKEN = 'muse-agent-credential';
@@ -163,6 +164,20 @@ describe('AgentcoordBoardService op mapping', () => {
     expect(fake.last('job_update')!.payload).toEqual({ id: 11, action: 'done', note: 'commit abc, tests pass' });
     await service.myJobs(muse);
     expect(fake.last('my_jobs')!.payload).toEqual({});
+  });
+
+  it('lists only allowlisted projects and flags vision swarms', async () => {
+    const { fake, service, muse } = setup();
+    const all = await service.projectList(muse, {});
+    expect(fake.last('project_list')!.payload).toEqual({});
+    const names = (all['projects'] as JsonObject[]).map((row) => row['name']);
+    expect(names).not.toContain('secret-repo');
+    const oak = (all['projects'] as JsonObject[]).find((row) => row['name'] === 'oakhaven')!;
+    expect(oak['swarm']).toBe(true);
+    expect(oak['agents']).toBeUndefined();
+    const swarms = await service.projectList(muse, { swarmsOnly: true, includeDone: true });
+    expect(fake.last('project_list')!.payload).toEqual({ include_done: true });
+    expect((swarms['projects'] as JsonObject[]).every((row) => row['swarm'] === true)).toBe(true);
   });
 
   it('refuses projects outside the allowlist before calling the service', async () => {

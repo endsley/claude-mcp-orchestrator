@@ -24,7 +24,7 @@ const BOARD_INSTRUCTIONS =
 const AGENTCOORD_BOARD_INSTRUCTIONS =
   "This server connects you to the Agent Coordination service used by every agent working on the owner's " +
   'repositories. Start with coord_attention and handle (then coord_ack) what needs you; resume your own jobs ' +
-  '(coord_my_jobs) before taking new ones (coord_project_show, coord_job_take). Before editing, read ' +
+  '(coord_my_jobs) before taking new ones (coord_project_list, coord_project_show, coord_job_take). Before editing, read ' +
   'code_coordination_board and claim the files you will change with post_code_task; message owners of ' +
   'conflicting claims instead of editing through them. Heartbeat during long work, report with ' +
   'coord_job_update, and always finish_code_task when you stop. Your identity comes from your credential ' +
