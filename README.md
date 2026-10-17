@@ -68,24 +68,69 @@ server errors. Tool responses avoid raw transcripts and chain-of-thought.
 ## Outside agent access (coordination board)
 
 Agents that are not the owner (another assistant, a coding agent, a CI job) can
-use the shared code coordination board through this server, and nothing else.
-They get seven tools: `code_coordination_board` (read active tasks, claims and
-recent messages), `post_code_task`, `claim_code_files`, `release_code_files`,
-`heartbeat_code_task`, `message_code_agents` and `finish_code_task`. They cannot
-list or call `start_work_session` or any other tool. The server checks scope
-on every call and also leaves non-permitted tools out of `tools/list`.
+use the shared coordination tools through this server, and nothing else. They
+cannot list or call `start_work_session` or any other tool. The server checks
+scope on every call and also leaves non-permitted tools out of `tools/list`.
 
-Your board identity comes from your credential, and tool arguments cannot
-change it:
+By default (`board.backend: agentcoord`) the tools talk to the Agent
+Coordination service (agentcoord). `board.backend: legacy` switches back to the
+old code coordination board, which has only the first seven tools.
 
-| Credential | Name on the board | Board session id |
-| --- | --- | --- |
-| Board token key | the key's name, e.g. `helper-bot` | `ext-key-<name>` |
-| OAuth token | `oauth:<client_name>` | `ext-oauth-<client_id>` |
+| Tool | agentcoord operation |
+| --- | --- |
+| `code_coordination_board` | `file_board`: live file claims of a repository |
+| `post_code_task` | `file_claim` (replace): say what you change, claim its files |
+| `claim_code_files` | `file_claim`: claim more (optionally `job`, `ack_jobs`, `read_only`) |
+| `release_code_files` | `file_release` |
+| `heartbeat_code_task` | `heartbeat`: extend claims and held jobs |
+| `message_code_agents` | `send`: to one `host/name` agent (`to`), or to all |
+| `finish_code_task` | `file_finish`: release this identity's claims |
+| `coord_attention` | `attention`: messages, assigned tasks, who you wait on |
+| `coord_ack` | `ack` message ids once handled |
+| `coord_read` | `read` one message in full |
+| `coord_project_show` | `project_show`: vision and ordered jobs |
+| `coord_job_take` | `job_take` (the job must be in the named project) |
+| `coord_job_update` | `job_update`: `progress`, `block`, `done` or `release` (with a note) |
+| `coord_my_jobs` | `my_jobs` |
 
-Projects are named by alias (for example `demo-app`). Claims are paths
-relative to the project root, of kind `file`, `tree` or `project`. Writes are
-rate-limited per identity: 30 a minute by default.
+Identity comes only from the credential, never from tool arguments. Each
+outside credential is mapped in config to its OWN agentcoord agent credential
+(`ext/<name>`); an unmapped credential is refused. The agentcoord session and
+worker id is the board session id below. Agentcoord applies its own routing
+rules (for example `ext/muse` may only take `code-simple` jobs) and the tools
+return its refusal as `PERMISSION_DENIED` with the service's message. Only
+configured projects are reachable, and results pass an allowlist: host paths
+(checkouts, project roots) and other internal fields are never returned.
+
+| Credential | Legacy board name | Session / worker id | agentcoord identity |
+| --- | --- | --- | --- |
+| Board token key | the key's name, e.g. `helper-bot` | `ext-key-<name>` | `board.agentcoord.identities.boardKeys.<name>` |
+| OAuth token | `oauth:<client_name>` | `ext-oauth-<client_id>` | `board.agentcoord.identities.oauthClients.<client_id>` |
+
+Writes are rate-limited per identity: 30 a minute by default (reads 120).
+
+### Three ways in
+
+1. **REST with a board key** (simplest for a headless agent):
+
+   ```bash
+   curl -sS https://<server>/board/v1/coord_attention \
+     -H "Authorization: Bearer mcpbk_..." -H 'content-type: application/json' -d '{}'
+   curl -sS https://<server>/board/v1/post_code_task \
+     -H "Authorization: Bearer mcpbk_..." -H 'content-type: application/json' \
+     -d '{"project":"oakhaven","task":"fix the menu","claims":[{"path":"src/menu.ts"}]}'
+   ```
+
+   `POST /board/v1/<tool_name>` with the tool's arguments as a JSON object
+   (at most 64 KiB). The reply is `{"ok":true,"text":...,"result":...}` or
+   `{"ok":false,"error":{"type","message","hint"?,"details"?}}` with status
+   400 (invalid arguments), 401 (no or bad credential), 403 (scope or
+   identity refused), 404 (unknown tool or project), 409 (claim conflict),
+   422 (refused by the service), 429 (rate limit) or 503 (service down).
+   OAuth access tokens with the `board` scope work here too.
+2. **MCP with a board key**: add `https://<server>/mcp` as a remote MCP
+   server and send `Authorization: Bearer mcpbk_...` on every request.
+3. **MCP with OAuth**: see Option 1 below; request the `board` scope.
 
 ### Option 1: OAuth (an MCP client with a browser)
 
@@ -97,6 +142,8 @@ rate-limited per identity: 30 a minute by default.
    granted. A `board` request can only be granted `board`. A full-access
    (`mcp`) request can be narrowed to "Coordination board only" before
    approving.
+4. With the agentcoord backend, the owner then maps the client's `client_id`
+   (`mcpc_...`) under `board.agentcoord.identities.oauthClients`.
 
 Access tokens last an hour; refresh tokens last 30 days and rotate on use.
 
@@ -111,7 +158,7 @@ npm run -s board-key -- list
 npm run -s board-key -- revoke <agent-name>
 ```
 
-Send the key as a bearer token on every MCP request:
+Send the key as a bearer token on every MCP or REST request:
 
 ```
 Authorization: Bearer mcpbk_...
@@ -123,10 +170,21 @@ cannot be recovered: revoke it and create a new one. Keep it out of Git.
 
 ### Server side
 
-`board:` in `config/orchestrator.yaml` sets the board service nodes (in
-failover order), the file that holds the board service token (read on every
-call, never logged, and sent only to the listed nodes), and the project
-aliases outside agents may use. See `config/orchestrator.example.yaml`.
+`board:` in `config/orchestrator.yaml` (see `config/orchestrator.example.yaml`):
+
+- `backend`: `agentcoord` (default) or `legacy`.
+- `agentcoord.nodes`: agentcoord nodes in failover order (port 8798). The
+  credential is sent only to these URLs; a "not leader" reply is followed
+  only to one of them.
+- `agentcoord.projects`: repository and plan names outside agents may use.
+- `agentcoord.identities`: per credential, `{agent: ext/<name>, tokenFile,
+  engine?}`. Create the credential with
+  `agentcoord admin credential create --kind agent --for-agent ext/<name>`
+  and store it in `tokenFile` (mode 600; read on every call, never logged).
+  The first call checks that the credential really is `agent`. `engine`, when
+  set, is sent as `X-Engine` for agentcoord's work-kind routing.
+- Legacy backend: `nodes`, `tokenFile` and `projects` (alias to root) as before.
+
 `scopesSupported` must include `board` for OAuth board grants.
 
 ## Context providers and profiles

@@ -10,6 +10,12 @@ import { SCOPE_FULL, type Scope } from './scopes.js';
  */
 export interface Principal {
   kind: 'oauth' | 'board-key' | 'static-bearer' | 'local';
+  /**
+   * The credential's stable id within its kind: the board key's name, the
+   * OAuth client_id, or a fixed owner label. Together with `kind` it selects
+   * the caller's agentcoord identity (config board.agentcoord.identities).
+   */
+  subject: string;
   scopes: ReadonlySet<Scope>;
   board: {
     /** Display name recorded on the board (`agent`). */
@@ -36,6 +42,7 @@ export function oauthPrincipal(input: { clientId: string; clientName?: string; s
   const label = sanitizeLabel(input.clientName ?? '', MAX_AGENT_CHARS - 'oauth:'.length) || input.clientId;
   return {
     kind: 'oauth',
+    subject: input.clientId,
     scopes: input.scopes,
     board: {
       agent: `oauth:${label}`,
@@ -49,15 +56,15 @@ export function oauthPrincipal(input: { clientId: string; clientName?: string; s
 export function boardKeyPrincipal(name: string, scopes: ReadonlySet<Scope>): Principal {
   // Each credential kind has its own session-id namespace (ext-key-,
   // ext-oauth-, ext-owner-), so no key name can produce another kind's id.
-  return { kind: 'board-key', scopes, board: { agent: name, sessionId: `ext-key-${name}` } };
+  return { kind: 'board-key', subject: name, scopes, board: { agent: name, sessionId: `ext-key-${name}` } };
 }
 
 export function staticBearerPrincipal(): Principal {
-  return { kind: 'static-bearer', scopes: new Set([SCOPE_FULL]), board: { agent: 'owner-bearer', sessionId: 'ext-owner-bearer' } };
+  return { kind: 'static-bearer', subject: 'owner-bearer', scopes: new Set([SCOPE_FULL]), board: { agent: 'owner-bearer', sessionId: 'ext-owner-bearer' } };
 }
 
 export function localPrincipal(): Principal {
-  return { kind: 'local', scopes: new Set([SCOPE_FULL]), board: { agent: 'owner-local', sessionId: 'ext-owner-local' } };
+  return { kind: 'local', subject: 'owner-local', scopes: new Set([SCOPE_FULL]), board: { agent: 'owner-local', sessionId: 'ext-owner-local' } };
 }
 
 const PRINCIPAL_KEY = 'claudeMcpOrchestratorPrincipal';

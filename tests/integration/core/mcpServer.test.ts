@@ -181,6 +181,14 @@ describe('MCP protocol', () => {
         'message_code_agents',
         'post_code_task',
         'release_code_files',
+        // Agent Coordination work tools (board.backend agentcoord, the default).
+        'coord_ack',
+        'coord_attention',
+        'coord_job_take',
+        'coord_job_update',
+        'coord_my_jobs',
+        'coord_project_show',
+        'coord_read',
       ].sort(),
     );
 

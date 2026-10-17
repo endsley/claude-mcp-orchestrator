@@ -31,6 +31,8 @@ let handle: HttpServerHandle;
 let base: string;
 let fake: FakeBoardClient;
 let keys: BoardKeyStore;
+/** The legacy backend registers the seven board tools, not the agentcoord coord_* ones. */
+const LEGACY_TOOLS = [...BOARD_TOOL_NAMES].filter((name) => !name.startsWith('coord_')).sort();
 
 function pkce(): { verifier: string; challenge: string } {
   const verifier = randomBytes(48).toString('base64url');
@@ -139,6 +141,7 @@ beforeAll(async () => {
       '  provider: none',
       'board:',
       '  enabled: true',
+      '  backend: legacy',
       '  nodes: [{ name: fake, url: "http://127.0.0.1:9" }]',
       `  tokenFile: ${join(dir, 'board_token')}`,
       '  projects:',
@@ -172,7 +175,7 @@ afterAll(async () => {
 describe('board token keys', () => {
   it('see exactly the board tools', async () => {
     const { key } = keys.create('lister');
-    expect(await toolNames(key)).toEqual([...BOARD_TOOL_NAMES].sort());
+    expect(await toolNames(key)).toEqual(LEGACY_TOOLS);
   });
 
   it('cannot call start_work_session or any other non-board tool', async () => {
@@ -255,7 +258,7 @@ describe('OAuth scopes', () => {
   it('a board-scoped OAuth token sees only board tools and is identified as oauth:<client_name>', async () => {
     const { accessToken, scope, clientId } = await oauthToken('Remote Agent', 'board', 'board');
     expect(scope).toBe('board');
-    expect(await toolNames(accessToken)).toEqual([...BOARD_TOOL_NAMES].sort());
+    expect(await toolNames(accessToken)).toEqual(LEGACY_TOOLS);
     expect(refused(await rpc(accessToken, 'tools/call', { name: 'start_work_session', arguments: { instruction: 'x' } }))).toBe(true);
 
     await rpc(accessToken, 'tools/call', { name: 'heartbeat_code_task', arguments: { agent: 'helper-bot' } });
@@ -267,7 +270,7 @@ describe('OAuth scopes', () => {
   it('the approver can narrow a full-access request to board only', async () => {
     const { accessToken, scope } = await oauthToken('Narrowed', 'mcp', 'board');
     expect(scope).toBe('board');
-    expect(await toolNames(accessToken)).toEqual([...BOARD_TOOL_NAMES].sort());
+    expect(await toolNames(accessToken)).toEqual(LEGACY_TOOLS);
   });
 
   it('the mcp scope still gets every tool, board tools included', async () => {
@@ -275,7 +278,7 @@ describe('OAuth scopes', () => {
     expect(scope).toBe('mcp');
     const names = await toolNames(accessToken);
     expect(names).toContain('start_work_session');
-    for (const board of BOARD_TOOL_NAMES) expect(names).toContain(board);
+    for (const board of LEGACY_TOOLS) expect(names).toContain(board);
   });
 
   it('a token whose scope names nothing known sees no tools at all', async () => {

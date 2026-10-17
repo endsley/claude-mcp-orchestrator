@@ -8,6 +8,8 @@ import { openDatabase, type Db } from './db/database.js';
 import { KvCache } from './db/kvCache.js';
 import { createLogger, type Logger } from './logging/logger.js';
 import { FilesystemScope } from './security/paths.js';
+import { AgentcoordClient, type AgentcoordTransport } from './services/board/agentcoord-client.js';
+import { AgentcoordBoardService } from './services/board/agentcoord-service.js';
 import { BoardService } from './services/board/board-service.js';
 import { HttpBoardClient, tokenFileReader } from './services/board/http-board-client.js';
 import type { BoardClient } from './services/board/types.js';
@@ -64,6 +66,8 @@ export interface BuildApplicationOptions {
   logger?: Logger;
   /** Override the coordination board client, e.g. with a fake in tests. */
   boardClient?: BoardClient;
+  /** Override the agentcoord transport, e.g. with a fake in tests. */
+  agentcoordTransport?: AgentcoordTransport;
 }
 
 export async function buildApplication(options: BuildApplicationOptions = {}): Promise<Application> {
@@ -194,6 +198,22 @@ export async function buildApplication(options: BuildApplicationOptions = {}): P
     },
     logger.child({ component: 'board' }),
   );
+  const agentcoordTransport =
+    options.agentcoordTransport ??
+    new AgentcoordClient({
+      nodes: config.board.agentcoord.nodes,
+      requestTimeoutMs: config.board.requestTimeoutMs,
+      busyRetries: config.board.busyRetries,
+      downCacheMs: config.board.downCacheMs,
+    });
+  const agentcoord = new AgentcoordBoardService(
+    agentcoordTransport,
+    config.board,
+    // Each identity's own credential file, read on every call so rotating it
+    // needs no restart. Paths may start with ~.
+    (path) => tokenFileReader(expandPath(path, boardBase))(),
+    logger.child({ component: 'agentcoord' }),
+  );
 
   const services: Services = {
     config,
@@ -210,6 +230,7 @@ export async function buildApplication(options: BuildApplicationOptions = {}): P
     contextAssembler,
     contextRegistry: registry,
     board,
+    agentcoord,
   };
 
   // Reconcile durable state with the fact that no workers survived a restart.

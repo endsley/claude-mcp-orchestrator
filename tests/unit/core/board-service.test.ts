@@ -130,14 +130,31 @@ describe('claim path normalisation', () => {
 });
 
 describe('board config', () => {
-  it('refuses an enabled board with no nodes or token file', () => {
-    const result = appConfigSchema.safeParse({ board: { enabled: true } });
+  it('refuses an enabled legacy board with no nodes or token file', () => {
+    const result = appConfigSchema.safeParse({ board: { enabled: true, backend: 'legacy' } });
     expect(result.success).toBe(false);
     const paths = result.error!.issues.map((issue) => issue.path.join('.'));
     expect(paths).toEqual(expect.arrayContaining(['board.nodes', 'board.tokenFile']));
   });
 
-  it('defaults to disabled, which needs nothing', () => {
-    expect(appConfigSchema.parse({}).board.enabled).toBe(false);
+  it('refuses an enabled agentcoord board with no nodes, and does not ask for the legacy settings', () => {
+    const result = appConfigSchema.safeParse({ board: { enabled: true } });
+    expect(result.success).toBe(false);
+    const paths = result.error!.issues.map((issue) => issue.path.join('.'));
+    expect(paths).toEqual(['board.agentcoord.nodes']);
+  });
+
+  it('defaults to disabled, which needs nothing, on the agentcoord backend', () => {
+    const board = appConfigSchema.parse({}).board;
+    expect(board.enabled).toBe(false);
+    expect(board.backend).toBe('agentcoord');
+  });
+
+  it('accepts only ext/ agent ids for agentcoord identities', () => {
+    const parse = (agent: string) =>
+      boardConfigSchema.safeParse({ agentcoord: { identities: { boardKeys: { muse: { agent, tokenFile: '/x/muse.token' } } } } });
+    expect(parse('ext/muse').success).toBe(true);
+    expect(parse('katie/claude').success).toBe(false);
+    expect(parse('ext/Muse').success).toBe(false);
   });
 });

@@ -50,7 +50,7 @@ const CONNECT_PHASE_CODES = new Set([
   'UND_ERR_CONNECT_TIMEOUT',
 ]);
 
-function failedBeforeSending(error: unknown): boolean {
+export function failedBeforeSending(error: unknown): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
     const code = (current as Error & { code?: unknown }).code;
@@ -61,7 +61,7 @@ function failedBeforeSending(error: unknown): boolean {
 }
 
 /** Read a body up to `limit` bytes; throws (and cancels the stream) beyond it. */
-async function readCapped(response: Response, limit: number): Promise<string> {
+export async function readCapped(response: Response, limit: number): Promise<string> {
   const declared = Number(response.headers.get('content-length') ?? NaN);
   if (Number.isFinite(declared) && declared > limit) {
     await response.body?.cancel().catch(() => undefined);
@@ -97,7 +97,7 @@ export function tokenFileReader(path: string | undefined): () => Promise<string 
   };
 }
 
-function normaliseUrl(url: string): string {
+export function normaliseUrl(url: string): string {
   return url.replace(/\/+$/, '');
 }
 

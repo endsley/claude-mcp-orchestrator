@@ -20,6 +20,16 @@ const BOARD_INSTRUCTIONS =
   'instead of editing through them, and always finish_code_task when you stop. Your board identity ' +
   'comes from your credential and cannot be changed.';
 
+/** Board-only instructions when the board is the Agent Coordination service. */
+const AGENTCOORD_BOARD_INSTRUCTIONS =
+  "This server connects you to the Agent Coordination service used by every agent working on the owner's " +
+  'repositories. Start with coord_attention and handle (then coord_ack) what needs you; resume your own jobs ' +
+  '(coord_my_jobs) before taking new ones (coord_project_show, coord_job_take). Before editing, read ' +
+  'code_coordination_board and claim the files you will change with post_code_task; message owners of ' +
+  'conflicting claims instead of editing through them. Heartbeat during long work, report with ' +
+  'coord_job_update, and always finish_code_task when you stop. Your identity comes from your credential ' +
+  'and cannot be changed.';
+
 /**
  * Build a fully-registered MCP server for one request's principal.
  *
@@ -37,7 +47,13 @@ const BOARD_INSTRUCTIONS =
 export function createMcpServer(services: Services, principal: Principal | undefined): McpServer {
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
-    { instructions: principal?.scopes.has(SCOPE_FULL) ? SERVER_INSTRUCTIONS : BOARD_INSTRUCTIONS },
+    {
+      instructions: principal?.scopes.has(SCOPE_FULL)
+        ? SERVER_INSTRUCTIONS
+        : services.config.board.backend === 'legacy'
+          ? BOARD_INSTRUCTIONS
+          : AGENTCOORD_BOARD_INSTRUCTIONS,
+    },
   );
   const scopes = principal?.scopes ?? new Set();
   const original = server.registerTool.bind(server) as (...args: unknown[]) => unknown;

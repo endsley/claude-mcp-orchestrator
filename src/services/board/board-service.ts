@@ -30,7 +30,7 @@ export const BOARD_LIMITS = {
  * Fixed-window counter per identity. In memory on purpose: a restart clears
  * it, and the map is bounded so a stream of identities cannot grow it.
  */
-class IdentityRateLimiter {
+export class IdentityRateLimiter {
   private readonly windows = new Map<string, { count: number; resetAt: number }>();
   private static readonly MAX_KEYS = 10_000;
 

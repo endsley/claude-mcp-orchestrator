@@ -23,6 +23,7 @@ import {
 import { parseScopes, SCOPE_BOARD } from '../security/scopes.js';
 import { assertSafeDeployment, BearerAuthenticator } from './auth.js';
 import type { Services } from './container.js';
+import { createBoardRestHandler } from './board-rest.js';
 import { createMcpServer } from './mcpServer.js';
 
 export interface HttpServerHandle {
@@ -263,9 +264,20 @@ export function createHttpApp(
     return parts.join(', ');
   };
 
-  const unauthorized = (res: Response, reason: string): void => {
+  type Deny = (res: Response, reason: string) => void;
+
+  const unauthorized: Deny = (res, reason) => {
     logger.warn('rejected unauthenticated MCP request', { reason });
     res.status(401).set('WWW-Authenticate', challenge()).json({ error: 'unauthorized' });
+  };
+
+  /** The same refusal in the REST front door's envelope. */
+  const unauthorizedRest: Deny = (res, reason) => {
+    logger.warn('rejected unauthenticated board REST request', { reason });
+    res
+      .status(401)
+      .set('WWW-Authenticate', challenge())
+      .json({ ok: false, error: { type: 'AUTH_REQUIRED', message: 'unauthorized' } });
   };
 
   const bearerOf = (header: string | undefined): string | undefined => {
@@ -284,39 +296,39 @@ export function createHttpApp(
    * A token carrying the board-key prefix never falls through to the other
    * credential checks, so the two kinds cannot be confused for each other.
    */
-  const admitBoardKey = (req: Request, res: Response, token: string, next: NextFunction): void => {
+  const admitBoardKey = (req: Request, res: Response, token: string, next: NextFunction, deny: Deny): void => {
     const key = boardKeys.verify(token);
     if (!key) {
-      unauthorized(res, 'board key unknown or revoked');
+      deny(res, 'board key unknown or revoked');
       return;
     }
     admit(req, boardKeyPrincipal(key.name, new Set([SCOPE_BOARD])), `board-key:${key.name}`, next);
   };
 
-  const requireAuth = (req: Request, res: Response, next: NextFunction): void => {
+  const authenticate = (req: Request, res: Response, next: NextFunction, deny: Deny): void => {
     const header = req.headers.authorization;
     const presented = bearerOf(header);
 
     if (presented !== undefined && presented.startsWith(BOARD_KEY_PREFIX) && config.server.auth.mode !== 'none') {
-      admitBoardKey(req, res, presented, next);
+      admitBoardKey(req, res, presented, next, deny);
       return;
     }
 
     if (oauth) {
       if (!presented) {
-        unauthorized(res, 'missing bearer token');
+        deny(res, 'missing bearer token');
         return;
       }
       const record = oauth.store.lookupToken(presented, 'access');
       if (!record) {
-        unauthorized(res, 'access token unknown, expired or revoked');
+        deny(res, 'access token unknown, expired or revoked');
         return;
       }
       // RFC 8707 / MCP: the token MUST have been issued for THIS resource.
       // Skipping this is how a token minted for another service gets accepted.
       if (!audienceMatches(record.audience, oauth.resource)) {
         logger.warn('rejected token issued for a different audience', { audience: record.audience });
-        unauthorized(res, 'token audience does not match this resource');
+        deny(res, 'token audience does not match this resource');
         return;
       }
       // Scope is enforced per tool by createMcpServer. A token whose scope
@@ -354,11 +366,22 @@ export function createHttpApp(
       admit(req, staticBearerPrincipal(), 'static-bearer', next);
       return;
     }
-    unauthorized(res, result.reason ?? 'invalid token');
+    deny(res, result.reason ?? 'invalid token');
   };
+
+  const requireAuth = (req: Request, res: Response, next: NextFunction): void => authenticate(req, res, next, unauthorized);
+  const requireAuthRest = (req: Request, res: Response, next: NextFunction): void =>
+    authenticate(req, res, next, unauthorizedRest);
 
   app.all(config.server.mcpPath, requireAuth, (req: Request, res: Response) => {
     void nodeHandler(req, res, req.body);
+  });
+
+  // REST front door to the board tools: same authentication as MCP, same
+  // tool handlers, scope checked per tool. POST only.
+  app.post('/board/v1/:tool', requireAuthRest, createBoardRestHandler(services, logger));
+  app.all('/board/v1/:tool', (_req: Request, res: Response) => {
+    res.status(405).set('Allow', 'POST').json({ ok: false, error: { type: 'METHOD_NOT_ALLOWED', message: 'use POST' } });
   });
 
   logger.info('http app configured', {

@@ -4,11 +4,19 @@ import type { Principal } from '../security/principal.js';
 import type { Services } from '../server/container.js';
 import { BOARD_LIMITS } from '../services/board/board-service.js';
 import type { JsonObject, JsonValue } from '../types/json.js';
+import { agentcoordBoardTools } from './agentcoord-board.js';
+import { claimArg, defineBoardTool, type BoardToolDef } from './board-tool.js';
 import { guarded, toolResult } from './result.js';
 
 /**
  * Code coordination board tools: the whole surface a `board`-scoped outside
  * agent can reach.
+ *
+ * Each tool is a BoardToolDef - name, description, zod input schema and a
+ * handler bound to the caller's principal - so the MCP registration below and
+ * the REST front door (server/board-rest.ts) run exactly the same code. Which
+ * set is live depends on board.backend: agentcoord (tools/agentcoord-board.ts)
+ * or the legacy board (legacyBoardTools below, kept for rollback).
  *
  * Note what no schema here has: an agent, session_id or identity field. The
  * caller's board identity comes from `principal`, which authentication
@@ -20,18 +28,6 @@ const projectArg = z
   .string()
   .regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, 'a board project alias such as "demo-app"')
   .describe('Board project alias, e.g. "demo-app". Not a path.');
-
-const claimArg = z.object({
-  path: z
-    .string()
-    .min(1)
-    .max(BOARD_LIMITS.claimPathChars)
-    .describe('Path relative to the project root, e.g. "src/app.ts" or "docs". Ignored for kind "project".'),
-  kind: z
-    .enum(['file', 'tree', 'project'])
-    .default('file')
-    .describe('"file" for one file, "tree" for a directory and everything under it, "project" for the whole project.'),
-});
 
 const claimsArg = z.array(claimArg).max(BOARD_LIMITS.claimsPerCall);
 
@@ -103,13 +99,16 @@ function summariseSnapshot(result: JsonValue, project: string): string {
   return lines.join('\n');
 }
 
-export function registerBoardTools(server: McpServer, services: Services, principal: Principal): void {
-  const { logger, board } = services;
+export type { BoardToolDef } from './board-tool.js';
+
+/** The legacy code coordination board's tools (board.backend: legacy). */
+export function legacyBoardTools(services: Services, principal: Principal): BoardToolDef[] {
+  const { board } = services;
   const you = `You appear on the board as "${principal.board.agent}" (session ${principal.board.sessionId}).`;
 
-  server.registerTool(
-    'code_coordination_board',
-    {
+  return [
+    defineBoardTool({
+      name: 'code_coordination_board',
       title: 'Read the code coordination board',
       description:
         'Show the shared code coordination board for a project: active tasks, the files each agent has ' +
@@ -119,20 +118,17 @@ export function registerBoardTools(server: McpServer, services: Services, princi
         project: projectArg,
         include_history: z.boolean().optional().describe('Also include recently finished tasks.'),
       }),
-    },
-    guarded('code_coordination_board', logger, async (args) => {
-      const result = await board.snapshot(principal, {
-        project: args.project,
-        ...(args.include_history !== undefined ? { includeHistory: args.include_history } : {}),
-      });
-      const visible = publicSnapshot(result);
-      return toolResult(summariseSnapshot(visible, args.project), visible);
+      run: async (args) => {
+        const result = await board.snapshot(principal, {
+          project: args.project,
+          ...(args.include_history !== undefined ? { includeHistory: args.include_history } : {}),
+        });
+        const visible = publicSnapshot(result);
+        return { text: summariseSnapshot(visible, args.project), structured: visible };
+      },
     }),
-  );
-
-  server.registerTool(
-    'post_code_task',
-    {
+    defineBoardTool({
+      name: 'post_code_task',
       title: 'Post a task to the board',
       description:
         'Announce what you are about to work on in a project, and claim the files or directories you ' +
@@ -143,16 +139,13 @@ export function registerBoardTools(server: McpServer, services: Services, princi
         task: z.string().min(1).max(BOARD_LIMITS.taskChars).describe('One line: what you are doing.'),
         claims: claimsArg.default([]).describe('Files or directories you will modify.'),
       }),
-    },
-    guarded('post_code_task', logger, async (args) => {
-      const result = await board.postTask(principal, { project: args.project, task: args.task, claims: args.claims });
-      return toolResult(`Posted your task on ${args.project} with ${args.claims.length} claim(s).`, publicWorkItem(result));
+      run: async (args) => {
+        const result = await board.postTask(principal, { project: args.project, task: args.task, claims: args.claims });
+        return { text: `Posted your task on ${args.project} with ${args.claims.length} claim(s).`, structured: publicWorkItem(result) };
+      },
     }),
-  );
-
-  server.registerTool(
-    'claim_code_files',
-    {
+    defineBoardTool({
+      name: 'claim_code_files',
       title: 'Claim more files',
       description:
         'Add file or directory claims to your posted task in a project, keeping the ones you already ' +
@@ -162,48 +155,39 @@ export function registerBoardTools(server: McpServer, services: Services, princi
         claims: claimsArg.min(1),
         task: z.string().min(1).max(BOARD_LIMITS.taskChars).optional(),
       }),
-    },
-    guarded('claim_code_files', logger, async (args) => {
-      const result = await board.claim(principal, {
-        project: args.project,
-        claims: args.claims,
-        ...(args.task !== undefined ? { task: args.task } : {}),
-      });
-      return toolResult(`Claimed ${args.claims.length} more path(s) on ${args.project}.`, publicWorkItem(result));
+      run: async (args) => {
+        const result = await board.claim(principal, {
+          project: args.project,
+          claims: args.claims,
+          ...(args.task !== undefined ? { task: args.task } : {}),
+        });
+        return { text: `Claimed ${args.claims.length} more path(s) on ${args.project}.`, structured: publicWorkItem(result) };
+      },
     }),
-  );
-
-  server.registerTool(
-    'release_code_files',
-    {
+    defineBoardTool({
+      name: 'release_code_files',
       title: 'Release claimed files',
       description: 'Release some of your claims in a project while keeping your task open.',
       inputSchema: z.object({ project: projectArg, claims: claimsArg.min(1) }),
-    },
-    guarded('release_code_files', logger, async (args) => {
-      const result = await board.release(principal, { project: args.project, claims: args.claims });
-      return toolResult(`Released ${typeof result === 'number' ? result : 0} claim(s) on ${args.project}.`, { released: result });
+      run: async (args) => {
+        const result = await board.release(principal, { project: args.project, claims: args.claims });
+        return { text: `Released ${typeof result === 'number' ? result : 0} claim(s) on ${args.project}.`, structured: { released: result } };
+      },
     }),
-  );
-
-  server.registerTool(
-    'heartbeat_code_task',
-    {
+    defineBoardTool({
+      name: 'heartbeat_code_task',
       title: 'Keep your board task alive',
       description:
         'Refresh your open task(s) so the board does not treat them as stale. Call it every few minutes ' +
         'during long work. Omit project to refresh all of your open tasks.',
       inputSchema: z.object({ project: projectArg.optional() }),
-    },
-    guarded('heartbeat_code_task', logger, async (args) => {
-      const result = await board.heartbeat(principal, args.project !== undefined ? { project: args.project } : {});
-      return toolResult(`Refreshed ${typeof result === 'number' ? result : 0} open task(s).`, { refreshed: result });
+      run: async (args) => {
+        const result = await board.heartbeat(principal, args.project !== undefined ? { project: args.project } : {});
+        return { text: `Refreshed ${typeof result === 'number' ? result : 0} open task(s).`, structured: { refreshed: result } };
+      },
     }),
-  );
-
-  server.registerTool(
-    'message_code_agents',
-    {
+    defineBoardTool({
+      name: 'message_code_agents',
       title: 'Message other agents',
       description:
         'Post a message on a project board: to everyone, or to one agent by its session id (from ' +
@@ -213,20 +197,17 @@ export function registerBoardTools(server: McpServer, services: Services, princi
         body: z.string().min(1).max(BOARD_LIMITS.messageChars),
         recipient_session_id: z.string().min(1).max(200).optional().describe('Omit to broadcast.'),
       }),
-    },
-    guarded('message_code_agents', logger, async (args) => {
-      const result = await board.message(principal, {
-        project: args.project,
-        body: args.body,
-        ...(args.recipient_session_id !== undefined ? { recipientSessionId: args.recipient_session_id } : {}),
-      });
-      return toolResult(`Message posted on ${args.project}.`, { message_id: result });
+      run: async (args) => {
+        const result = await board.message(principal, {
+          project: args.project,
+          body: args.body,
+          ...(args.recipient_session_id !== undefined ? { recipientSessionId: args.recipient_session_id } : {}),
+        });
+        return { text: `Message posted on ${args.project}.`, structured: { message_id: result } };
+      },
     }),
-  );
-
-  server.registerTool(
-    'finish_code_task',
-    {
+    defineBoardTool({
+      name: 'finish_code_task',
       title: 'Finish your board task',
       description:
         'Mark your task in a project completed (or canceled) and release all of its claims. Always call ' +
@@ -237,17 +218,39 @@ export function registerBoardTools(server: McpServer, services: Services, princi
         result: z.string().max(BOARD_LIMITS.resultChars).optional().describe('What you did, briefly.'),
         canceled: z.boolean().optional(),
       }),
-    },
-    guarded('finish_code_task', logger, async (args) => {
-      const result = await board.finish(principal, {
-        ...(args.project !== undefined ? { project: args.project } : {}),
-        ...(args.all_projects !== undefined ? { allProjects: args.all_projects } : {}),
-        ...(args.result !== undefined ? { result: args.result } : {}),
-        ...(args.canceled !== undefined ? { canceled: args.canceled } : {}),
-      });
-      return toolResult(result === true ? 'Task finished and claims released.' : 'You had no open task to finish.', {
-        finished: result,
-      });
+      run: async (args) => {
+        const result = await board.finish(principal, {
+          ...(args.project !== undefined ? { project: args.project } : {}),
+          ...(args.all_projects !== undefined ? { allProjects: args.all_projects } : {}),
+          ...(args.result !== undefined ? { result: args.result } : {}),
+          ...(args.canceled !== undefined ? { canceled: args.canceled } : {}),
+        });
+        return {
+          text: result === true ? 'Task finished and claims released.' : 'You had no open task to finish.',
+          structured: { finished: result },
+        };
+      },
     }),
-  );
+  ];
+}
+
+/** The live board tool set for this server's backend, bound to `principal`. */
+export function boardTools(services: Services, principal: Principal): BoardToolDef[] {
+  return services.config.board.backend === 'legacy'
+    ? legacyBoardTools(services, principal)
+    : agentcoordBoardTools(services, principal);
+}
+
+export function registerBoardTools(server: McpServer, services: Services, principal: Principal): void {
+  const { logger } = services;
+  for (const tool of boardTools(services, principal)) {
+    server.registerTool(
+      tool.name,
+      { title: tool.title, description: tool.description, inputSchema: tool.inputSchema },
+      guarded(tool.name, logger, async (args: unknown) => {
+        const { text, structured } = await tool.run(args);
+        return toolResult(text, structured);
+      }),
+    );
+  }
 }

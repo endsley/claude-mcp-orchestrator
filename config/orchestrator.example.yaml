@@ -188,17 +188,35 @@ computers:
       vramGb: 24
 
 # Coordination board access for outside agents (board-scoped OAuth tokens and
-# board token keys; see README "Outside agent access"). The board service
-# token lives in tokenFile (mode 600, outside Git) and is sent only to the
-# nodes listed here. Outside agents may coordinate only on the project
-# aliases listed under `projects`.
+# board token keys; see README "Outside agent access"). Outside agents reach
+# it over MCP (/mcp) or REST (POST /board/v1/<tool>), with the same tools.
 board:
   enabled: false
+  # agentcoord = the Agent Coordination service (default); legacy = the old
+  # code coordination board below, kept for rollback.
+  backend: agentcoord
+  agentcoord:
+    # Failover order. Credentials are sent only to these URLs, and a
+    # "not leader" redirect is followed only to one of them.
+    nodes:
+      - { name: primary, url: "http://100.64.0.1:8798" }
+      - { name: standby, url: "http://100.64.0.2:8798" }
+    # Projects outside agents may reach: repository names (file claims) and
+    # plan names (jobs). Everything else is refused.
+    projects: [example-project]
+    # Each outside credential acts as its OWN agentcoord agent. Create one per
+    # identity: agentcoord admin credential create --kind agent --for-agent ext/<name>
+    # and store it in tokenFile (mode 600, outside Git; read on every call).
+    # An authenticated caller with no entry here is refused.
+    identities:
+      boardKeys:              # board token key name -> identity
+        helper-bot: { agent: ext/helper-bot, tokenFile: ~/.config/claude-mcp-orchestrator/agentcoord/helper-bot.token }
+      oauthClients: {}        # OAuth client_id (mcpc_...) -> identity
+  writesPerMinute: 30
+  readsPerMinute: 120
+  # ---- legacy backend only
   nodes:
     - { name: primary, url: "http://100.64.0.1:8797" }
-    - { name: standby, url: "http://100.64.0.2:8797" }
   tokenFile: ~/.local/share/board/board_token
   projects:
     example-project: /home/YOUR_USER/code/example-project
-  writesPerMinute: 30
-  readsPerMinute: 120

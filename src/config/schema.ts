@@ -321,8 +321,61 @@ export const computerMetadataSchema = z.object({
  * appears in config. It is sent only to the node URLs listed here - a "not
  * leader" redirect to any other URL is ignored rather than followed.
  */
+/** An agentcoord name segment: lowercase letters, digits, dot, dash, underscore. */
+const AGENTCOORD_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+/**
+ * The agentcoord identity one outside caller acts as. Each outside identity
+ * has its OWN agentcoord agent credential (`agentcoord admin credential create
+ * --kind agent --for-agent ext/<name>`), kept in `tokenFile` (mode 600,
+ * outside Git, read on every call). The credential decides who the caller is
+ * on agentcoord; `agent` is what this server expects it to resolve to, and a
+ * mismatch is refused.
+ */
+export const agentcoordIdentitySchema = z.object({
+  /** Expected agentcoord agent id. Outside identities only: `ext/<name>`. */
+  agent: z.string().regex(/^ext\/[a-z0-9][a-z0-9._-]{0,63}$/, 'an outside agent id such as "ext/muse"'),
+  tokenFile: absolutePath,
+  /** Sent as X-Engine (work-kind routing), only when set. */
+  engine: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,31}$/).optional(),
+});
+
+/**
+ * The Agent Coordination service (agentcoord) backend of the board tools.
+ *
+ * Nodes are tried in failover order; the bearer credential is sent ONLY to
+ * these URLs, and a "not leader" redirect is followed only to one of them.
+ * An authenticated caller with no entry under `identities` is refused: there
+ * is no shared fallback credential.
+ */
+export const agentcoordConfigSchema = z.object({
+  nodes: z
+    .array(z.object({ name: z.string().min(1).max(64), url: z.string().url() }))
+    .default([]),
+  /**
+   * agentcoord projects outside callers may reach: repository names for file
+   * claims, plan names for project plans and jobs. Anything else is refused.
+   */
+  projects: z.array(z.string().regex(AGENTCOORD_NAME)).default([]),
+  identities: z
+    .object({
+      /** Board token key name -> identity. */
+      boardKeys: z.record(z.string(), agentcoordIdentitySchema).prefault({}),
+      /** OAuth client_id -> identity. */
+      oauthClients: z.record(z.string(), agentcoordIdentitySchema).prefault({}),
+    })
+    .prefault({}),
+});
+
 export const boardConfigSchema = z.object({
   enabled: z.boolean().default(false),
+  /**
+   * Which coordination service the board tools use. `agentcoord` is the
+   * Agent Coordination service; `legacy` is the old code coordination board
+   * (`nodes`, `tokenFile`, `projects` below), kept for rollback.
+   */
+  backend: z.enum(['agentcoord', 'legacy']).default('agentcoord'),
+  agentcoord: agentcoordConfigSchema.prefault({}),
   /** Board nodes in failover order. */
   nodes: z
     .array(z.object({ name: z.string().min(1).max(64), url: z.string().url() }))
@@ -433,7 +486,16 @@ export const appConfigSchema = z
 
     // An enabled board with nowhere to send requests, or no token to send,
     // would only ever answer BOARD_UNAVAILABLE. Say so at load time instead.
-    if (config.board.enabled) {
+    if (config.board.enabled && config.board.backend === 'agentcoord') {
+      if (config.board.agentcoord.nodes.length === 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['board', 'agentcoord', 'nodes'],
+          message: 'board.backend "agentcoord" requires at least one entry in board.agentcoord.nodes',
+        });
+      }
+    }
+    if (config.board.enabled && config.board.backend === 'legacy') {
       if (config.board.nodes.length === 0) {
         ctx.addIssue({ code: 'custom', path: ['board', 'nodes'], message: 'board.enabled requires at least one entry in board.nodes' });
       }
@@ -472,6 +534,8 @@ export type ComputerMetadataConfig = z.infer<typeof computerMetadataSchema>;
 export type LoggingConfig = z.infer<typeof loggingConfigSchema>;
 export type DatabaseConfig = z.infer<typeof databaseConfigSchema>;
 export type BoardConfig = z.infer<typeof boardConfigSchema>;
+export type AgentcoordConfig = z.infer<typeof agentcoordConfigSchema>;
+export type AgentcoordIdentityConfig = z.infer<typeof agentcoordIdentitySchema>;
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]', '0:0:0:0:0:0:0:1']);
 

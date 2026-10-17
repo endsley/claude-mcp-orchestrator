@@ -29,6 +29,15 @@ export const BOARD_TOOL_NAMES: ReadonlySet<string> = new Set([
   'heartbeat_code_task',
   'message_code_agents',
   'finish_code_task',
+  // Agent Coordination (agentcoord) work tools; registered only when the
+  // board backend is agentcoord.
+  'coord_attention',
+  'coord_ack',
+  'coord_read',
+  'coord_project_show',
+  'coord_job_take',
+  'coord_job_update',
+  'coord_my_jobs',
 ]);
 
 export function isKnownScope(value: string): value is Scope {
@@ -64,7 +73,8 @@ export function describeScope(scope: Scope): { title: string; detail: string } {
       title: 'Coordination board only',
       detail:
         'Read the code coordination board, post and finish tasks, claim and release files, and send ' +
-        'board messages. Cannot start Claude Code, read files, or use any other tool.',
+        'board messages; read your coordination inbox and take and report project jobs. Cannot start ' +
+        'Claude Code, read files, or use any other tool.',
     };
   }
   return {
