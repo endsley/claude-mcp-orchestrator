@@ -114,6 +114,13 @@ export function publicJob(value: JsonValue | undefined): JsonObject {
   return pick(asObject(value), JOB_FIELDS);
 }
 
+const SWARM_CACHE_MS = 60_000;
+
+/** A vision swarm's plan vision starts with "VISION SWARM" (the swarm procedure's marker). */
+function isSwarmVision(vision: JsonValue | undefined): boolean {
+  return typeof vision === 'string' && vision.trimStart().toUpperCase().startsWith('VISION SWARM');
+}
+
 // ---------------------------------------------------------------- service
 
 export class AgentcoordBoardService {
@@ -122,6 +129,9 @@ export class AgentcoordBoardService {
   /** agent id -> fingerprint of the credential last confirmed to be that agent. */
   private readonly verified = new Map<string, string>();
   private readonly allowed: ReadonlySet<string>;
+  /** Vision swarm plan names, refreshed from project_list at most once a minute. */
+  private swarms: { names: ReadonlySet<string>; at: number } | undefined;
+  private readonly now: () => number;
 
   constructor(
     private readonly transport: AgentcoordTransport,
@@ -133,6 +143,7 @@ export class AgentcoordBoardService {
     this.writes = new IdentityRateLimiter(config.writesPerMinute, 60_000, now);
     this.reads = new IdentityRateLimiter(config.readsPerMinute, 60_000, now);
     this.allowed = new Set(config.agentcoord.projects);
+    this.now = now;
   }
 
   get enabled(): boolean {
@@ -144,9 +155,24 @@ export class AgentcoordBoardService {
     return [...this.allowed].sort();
   }
 
-  private requireProject(project: string): string {
-    if (!this.allowed.has(project)) {
-      const known = this.projectNames();
+  /** Configured projects plus, when enabled, every live vision swarm. */
+  private async reachable(principal: Principal): Promise<ReadonlySet<string>> {
+    if (!this.config.agentcoord.allowVisionSwarms) return this.allowed;
+    if (this.swarms === undefined || this.now() - this.swarms.at > SWARM_CACHE_MS) {
+      const result = await this.run(principal, 'project_list', {});
+      const names = asArray(result['projects'])
+        .map(asObject)
+        .filter((row) => typeof row['name'] === 'string' && isSwarmVision(row['vision']))
+        .map((row) => row['name'] as string);
+      this.swarms = { names: new Set(names), at: this.now() };
+    }
+    return new Set([...this.allowed, ...this.swarms.names]);
+  }
+
+  private async requireProject(principal: Principal, project: string): Promise<string> {
+    const allowed = await this.reachable(principal);
+    if (!allowed.has(project)) {
+      const known = [...allowed].sort();
       throw orchestratorError('PROJECT_NOT_FOUND', `"${project.slice(0, 64)}" is not a coordination project on this server.`, {
         details: { knownProjects: known },
         hint: known.length > 0 ? `Use one of: ${known.join(', ')}.` : 'No coordination projects are configured.',
@@ -283,7 +309,7 @@ export class AgentcoordBoardService {
   // ---- the seven board tools
 
   async board(principal: Principal, input: { project: string; includeHistory?: boolean }): Promise<JsonObject> {
-    const project = this.requireProject(input.project);
+    const project = await this.requireProject(principal, input.project);
     const result = await this.run(principal, 'file_board', { project });
     return {
       project,
@@ -308,7 +334,7 @@ export class AgentcoordBoardService {
   }
 
   async postTask(principal: Principal, input: { project: string; task: string; claims: ClaimInput[] }): Promise<JsonObject> {
-    const project = this.requireProject(input.project);
+    const project = await this.requireProject(principal, input.project);
     const claims = this.requireClaims(input.claims);
     return this.publicClaimResult(await this.run(principal, 'file_claim', { project, task: input.task, replace: true, claims }));
   }
@@ -317,7 +343,7 @@ export class AgentcoordBoardService {
     principal: Principal,
     input: { project: string; claims: ClaimInput[]; task?: string; job?: number; ackJobs?: number[]; readOnly?: boolean },
   ): Promise<JsonObject> {
-    const project = this.requireProject(input.project);
+    const project = await this.requireProject(principal, input.project);
     const payload: JsonObject = { project, claims: this.requireClaims(input.claims) };
     if (input.task !== undefined) payload['task'] = input.task;
     if (input.job !== undefined) payload['job'] = input.job;
@@ -327,7 +353,7 @@ export class AgentcoordBoardService {
   }
 
   async release(principal: Principal, input: { project: string; claims: ClaimInput[] }): Promise<JsonObject> {
-    const project = this.requireProject(input.project);
+    const project = await this.requireProject(principal, input.project);
     const paths = this.requireClaims(input.claims).map((claim) => claim['path'] as string);
     const result = await this.run(principal, 'file_release', { project, paths });
     return {
@@ -339,7 +365,7 @@ export class AgentcoordBoardService {
   }
 
   async heartbeat(principal: Principal, input: { project?: string }): Promise<JsonObject> {
-    if (input.project !== undefined) this.requireProject(input.project);
+    if (input.project !== undefined) await this.requireProject(principal, input.project);
     // agentcoord heartbeats every claim and job of this worker at once.
     const result = await this.run(principal, 'heartbeat', {});
     return {
@@ -350,7 +376,7 @@ export class AgentcoordBoardService {
   }
 
   async message(principal: Principal, input: { project: string; body: string; to?: string }): Promise<JsonObject> {
-    const project = this.requireProject(input.project);
+    const project = await this.requireProject(principal, input.project);
     if (input.to !== undefined && !AGENT_ID.test(input.to)) {
       throw orchestratorError('INVALID_ARGUMENT', 'Address a message to an agent id such as "katie/claude-ui" (host/name).');
     }
@@ -370,7 +396,7 @@ export class AgentcoordBoardService {
       if (input.project === undefined) {
         throw orchestratorError('INVALID_ARGUMENT', 'Name the project to finish, or set all_projects.');
       }
-      this.requireProject(input.project);
+      await this.requireProject(principal, input.project);
     }
     const note = input.result?.trim() || (input.canceled === true ? 'canceled' : undefined);
     // Never `all`: that would release every worker of the agent, not just this one.
@@ -417,13 +443,18 @@ export class AgentcoordBoardService {
     const payload: JsonObject = {};
     if (input.includeDone === true) payload['include_done'] = true;
     const result = await this.run(principal, 'project_list', payload);
+    const swarmsAllowed = this.config.agentcoord.allowVisionSwarms;
     const projects = asArray(result['projects'])
       .map(asObject)
-      .filter((row) => typeof row['name'] === 'string' && this.allowed.has(row['name'] as string))
+      .filter(
+        (row) =>
+          typeof row['name'] === 'string' &&
+          (this.allowed.has(row['name'] as string) || (swarmsAllowed && isSwarmVision(row['vision']))),
+      )
       .map((row) => {
         const vision = typeof row['vision'] === 'string' ? (row['vision'] as string) : '';
         const out: JsonObject = pick(row, ['name', 'repo', 'status', 'done', 'open', 'in_progress', 'blocked', 'updated_at']);
-        out['swarm'] = vision.trimStart().toUpperCase().startsWith('VISION SWARM');
+        out['swarm'] = isSwarmVision(vision);
         out['vision_preview'] = vision.slice(0, 200);
         return out;
       })
@@ -432,20 +463,21 @@ export class AgentcoordBoardService {
   }
 
   async projectShow(principal: Principal, input: { project: string; includeDone?: boolean }): Promise<JsonObject> {
-    const project = this.requireProject(input.project);
+    const project = await this.requireProject(principal, input.project);
     const result = await this.run(principal, 'project_show', { project });
     const jobs = asArray(result['jobs']).map(publicJob);
     const done = jobs.filter((job) => job['status'] === 'done');
     return {
       project: pick(asObject(result['project']), PROJECT_FIELDS),
-      jobs: input.includeDone === true ? jobs : jobs.filter((job) => job['status'] !== 'done'),
+      // Finished jobs are shown unless the caller asks for open work only.
+      jobs: input.includeDone === false ? jobs.filter((job) => job['status'] !== 'done') : jobs,
       done_count: done.length,
       next_open: result['next_open'] ?? null,
     };
   }
 
   async jobTake(principal: Principal, input: { project: string; id: number; note?: string }): Promise<JsonObject> {
-    const project = this.requireProject(input.project);
+    const project = await this.requireProject(principal, input.project);
     // A job is named by id alone, and ids span every project: confirm this
     // one is in the reachable project before taking it.
     const plan = await this.run(principal, 'project_show', { project });
@@ -477,7 +509,8 @@ export class AgentcoordBoardService {
     // Only the caller's own open jobs, and only in reachable projects.
     const mine = await this.run(principal, 'my_jobs', {});
     const job = asArray(mine['jobs']).map(asObject).find((row) => row['id'] === input.id);
-    if (job === undefined || typeof job['project'] !== 'string' || !this.allowed.has(job['project'])) {
+    const allowed = await this.reachable(principal);
+    if (job === undefined || typeof job['project'] !== 'string' || !allowed.has(job['project'])) {
       throw orchestratorError('PERMISSION_DENIED', `Job ${input.id} is not one of your open jobs in a reachable project.`, {
         hint: 'Take it first with coord_job_take; coord_my_jobs lists the jobs you hold.',
       });
@@ -490,9 +523,10 @@ export class AgentcoordBoardService {
 
   async myJobs(principal: Principal): Promise<JsonObject> {
     const result = await this.run(principal, 'my_jobs', {});
+    const allowed = await this.reachable(principal);
     const reachable = (row: JsonValue): boolean => {
       const project = asObject(row)['project'];
-      return typeof project === 'string' && this.allowed.has(project);
+      return typeof project === 'string' && allowed.has(project);
     };
     return {
       jobs: asArray(result['jobs']).filter(reachable).map((row) => pick(asObject(row), MY_JOB_FIELDS)),

@@ -238,8 +238,36 @@ describe('AgentcoordBoardService output allowlist', () => {
     const jobs = await service.myJobs(muse);
     expect((jobs['jobs'] as Array<{ id: number }>).map((job) => job.id)).toEqual([11]);
     const plan = await service.projectShow(muse, { project: 'oakhaven' });
-    expect((plan['jobs'] as Array<{ id: number }>).map((job) => job.id)).toEqual([11]);
+    // Finished jobs are shown by default; include_done false shows open work only.
+    expect((plan['jobs'] as Array<{ id: number }>).map((job) => job.id)).toEqual([11, 12]);
     expect(plan['done_count']).toBe(1);
+    const open = await service.projectShow(muse, { project: 'oakhaven', includeDone: false });
+    expect((open['jobs'] as Array<{ id: number }>).map((job) => job.id)).toEqual([11]);
+  });
+});
+
+describe('AgentcoordBoardService vision swarms', () => {
+  it('reaches every live vision swarm when allowVisionSwarms is on, and nothing else', async () => {
+    const fake = new FakeAgentcoord({ [MUSE_TOKEN]: 'ext/muse' });
+    const config = boardConfigSchema.parse({
+      enabled: true,
+      agentcoord: {
+        nodes: [{ name: 'eva', url: 'http://eva.test:8798' }],
+        projects: ['oakhaven'],
+        allowVisionSwarms: true,
+        identities: { boardKeys: { muse: { agent: 'ext/muse', tokenFile: '/secrets/muse.token' } } },
+      },
+    });
+    const service = new AgentcoordBoardService(fake, config, async () => MUSE_TOKEN, createNullLogger());
+    const muse = boardKeyPrincipal('muse', parseScopes('board'));
+    const listed = await service.projectList(muse, {});
+    const names = (listed['projects'] as JsonObject[]).map((row) => row['name']).sort();
+    // secret-repo is a swarm in the fake, so it becomes reachable; plain-plan is not a swarm.
+    expect(names).toEqual(['oakhaven', 'secret-repo']);
+    await service.projectShow(muse, { project: 'secret-repo' });
+    expect(fake.last('project_show')!.payload).toEqual({ project: 'secret-repo' });
+    const refused = await service.projectShow(muse, { project: 'plain-plan' }).catch((e: unknown) => e);
+    expect((refused as OrchestratorError).code).toBe('PROJECT_NOT_FOUND');
   });
 });
 

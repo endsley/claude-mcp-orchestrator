@@ -249,7 +249,7 @@ export function agentcoordBoardTools(services: Services, principal: Principal): 
         'Read it before taking a job.',
       inputSchema: z.object({
         project: projectArg,
-        include_done: z.boolean().optional().describe('Also list finished jobs.'),
+        include_done: z.boolean().optional().describe('Finished jobs are listed by default; false shows open jobs only.'),
       }),
       run: async (args) => {
         const result = await coord.projectShow(principal, {

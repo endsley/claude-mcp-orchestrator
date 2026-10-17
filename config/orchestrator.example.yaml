@@ -204,6 +204,9 @@ board:
     # Projects outside agents may reach: repository names (file claims) and
     # plan names (jobs). Everything else is refused.
     projects: [example-project]
+    # Also reach every vision swarm (plan vision starts with "VISION SWARM"),
+    # read live from agentcoord, so new swarms appear without a config change.
+    allowVisionSwarms: false
     # Each outside credential acts as its OWN agentcoord agent. Create one per
     # identity: agentcoord admin credential create --kind agent --for-agent ext/<name>
     # and store it in tokenFile (mode 600, outside Git; read on every call).

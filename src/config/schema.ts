@@ -357,6 +357,12 @@ export const agentcoordConfigSchema = z.object({
    * claims, plan names for project plans and jobs. Anything else is refused.
    */
   projects: z.array(z.string().regex(AGENTCOORD_NAME)).default([]),
+  /**
+   * Also reach every vision swarm: any project plan whose vision starts with
+   * "VISION SWARM", read live from agentcoord (cached ~60 s), so a new swarm
+   * is visible without a config change.
+   */
+  allowVisionSwarms: z.boolean().default(false),
   identities: z
     .object({
       /** Board token key name -> identity. */
